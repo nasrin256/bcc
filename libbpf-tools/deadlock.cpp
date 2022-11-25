@@ -31,11 +31,6 @@ extern "C" {
 #define warn(...)			fprintf(stderr, __VA_ARGS__)
 #define MUTEX_ALIAS_LEN			128
 #define MAX_LINKS			50
-/*
- * It is derived from two mutexes and represents the edge values of the graph.
- * If the edge keys are duplicated, this conversion must be replaced in another way.
- */
-#define EDGE_KEY(m, n)			(m + n)
 
 #define OPT_PERF_MAX_STACK_DEPTH	1 /* --perf-max-stack-depth */
 #define OPT_STACK_STORAGE_SIZE		2 /* --stack-storage-size */
@@ -66,8 +61,8 @@ static struct env {
 	.threads = 65536,
 	.interval = 3,
 	.binary = NULL,
-	.lock_symbols = "pthread_mutex_lock",
-	.unlock_symbols = "pthread_mutex_unlock",
+	.lock_symbols = (char*)"pthread_mutex_lock",
+	.unlock_symbols = (char*)"pthread_mutex_unlock",
 };
 
 const char *argp_program_version = "deadlock 0.1";
@@ -226,6 +221,13 @@ static void sig_handler(int sig)
 	exiting = true;
 }
 
+static int get_edge_key(__u64 m, __u64 n)
+{
+	__u64 data[2] = {m, n};
+
+	return gnu_debuglink_crc32(0, (char*)data, 16); /* 16 chars from 2 64bits */
+}
+
 template <typename N, typename A>
 static bool read_edges_map(int fd, digraph<N, A>& g,
 			   std::map<A, struct edges_leaf_t>& edge_map)
@@ -250,13 +252,20 @@ static bool read_edges_map(int fd, digraph<N, A>& g,
 						 val.thread_pid, val.comm);
 		}
 
-		edge_key = EDGE_KEY(next_key.mutex1, next_key.mutex2);
+		edge_key = get_edge_key(next_key.mutex1, next_key.mutex2);
 
 		/* add edge to graph */
 		g.add((const __u64)next_key.mutex1, (const __u64)next_key.mutex2, edge_key);
 
 		/* store edge information */
-		edge_map.insert(std::make_pair(edge_key, val));
+		auto ret = edge_map.find(edge_key);
+		if (ret == edge_map.end()) {
+			edge_map.insert(std::make_pair(edge_key, val));
+		} else {
+			warn("duplicated edge key: %d [0x%016llx -> 0x%016llx],\
+			       stack trace may be incorrect.\n", edge_key,
+			       next_key.mutex1, next_key.mutex2);
+		}
 
 		lookup_key = next_key;
 	}
@@ -343,7 +352,7 @@ static void print_cycle(int sfd, const struct syms *syms, const std::vector<N>& 
 			std::map<__u32, struct thread_created_leaf_t>& m_parent)
 {
 	int edge_key;
-	int i = 0;
+	size_t i = 0;
 	struct edges_leaf_t *attr;
 	std::map<int, std::string> node_name; /* Map mutex address -> readable alias */
 	std::set<__u32> thread_set; /* Set of threads involved in the lock inversion */
@@ -355,7 +364,7 @@ static void print_cycle(int sfd, const struct syms *syms, const std::vector<N>& 
 	printf("Cycle in lock order graph: ");
 	for (const __u64& m : cycle) {
 		/* TODO: For global or static variables, try to symbolize the mutex address. */
-		snprintf(buf, MUTEX_ALIAS_LEN, "Mutex M%d (0x%016llx)", i++, m);
+		snprintf(buf, MUTEX_ALIAS_LEN, "Mutex M%zu (0x%016llx)", i++, m);
 		printf("%s => ", buf);
 		node_name[m] = buf;
 	}
@@ -365,12 +374,17 @@ static void print_cycle(int sfd, const struct syms *syms, const std::vector<N>& 
 	for (i = 0; i < cycle.size(); i++) {
 		__u64 m = cycle[i];
 		__u64 n = cycle[(i+1) % cycle.size()];
-		edge_key = EDGE_KEY(m, n);
+		edge_key = get_edge_key(m, n);
 
 		if (env.verbose)
 			printf("get edge map, mutex1: 0x%016llx, mutex2: 0x%016llx\n", m, n);
 
 		auto ret = m_edge.find(edge_key);
+		if (ret == m_edge.end()) {
+			warn("failed to find edge map, mutex1: 0x%016llx, mutex2: 0x%016llx\n", m, n);
+			continue;
+		}
+
 		attr = &(ret->second);
 
 		thread_set.insert(attr->thread_pid);
@@ -408,16 +422,17 @@ template <typename N, typename A>
 static std::vector<N> cycle(const digraph<N, A> &scc)
 {
 	std::vector<N> cycle;
+	__u64 n = *scc.nodes().begin();
 
-	for (const auto& n : scc.nodes()) {
+	while (true) {
 		cycle.push_back(n);
 		for (const auto& c : scc.connections(n)) {
 			if (c.first == *scc.nodes().begin()) {
 				return cycle;
 			}
 		}
+		n = (*scc.connections(n).begin()).first;
 	}
-	return cycle;
 }
 
 static bool print_map(const struct syms *syms, struct deadlock_bpf *obj)
@@ -462,13 +477,7 @@ static bool print_map(const struct syms *syms, struct deadlock_bpf *obj)
 
 	if (cycles(g) > 0) {
 		auto h  = graph2dag(g);
-		auto s  = serialize(h); /* list of SCC(Strongly Connected Component)s */
-		if (env.verbose) {
-			std::cout << "g = " << g << "\n";
-			std::cout << "number of cycles: " << cycles(g) << "\n";
-			std::cout << "graph2dag(g)    = " << h << "\n";
-			std::cout << "serialize(h)    = " << s << "\n ";
-		}
+		auto s  = serialize(h);
 
 		for (const auto &scc : s) {
 			/* skip single node SCC */
@@ -476,9 +485,9 @@ static bool print_map(const struct syms *syms, struct deadlock_bpf *obj)
 				/* get a cycle from SCC */
 				const auto& c = cycle(scc);
 				print_cycle(sfd, syms, c, edge_map, parent_map);
-				return true;
 			}
 		}
+		return true;
 	}
 
 	return false;
@@ -527,7 +536,7 @@ static int attach_uprobes(struct deadlock_bpf *obj, struct bpf_link *links[])
 	obj->links.dummy_clone = bpf_program__attach(obj->progs.dummy_clone);
 	if (!obj->links.dummy_clone) {
 		err = -errno;
-		warn("failed to attach kprobe clone: %ld\n", err);
+		warn("failed to attach kprobe clone: %d\n", err);
 		return -1;
 	}
 
