@@ -12,6 +12,9 @@
 #include <bpf/libbpf.h>
 #include <bpf/bpf.h>
 #include "offcputime.h"
+#ifdef USE_LIBUNWIND
+#include "unwind_helpers.h"
+#endif
 #include "offcputime.skel.h"
 #include "trace_helpers.h"
 
@@ -27,6 +30,10 @@ static struct env {
 	long state;
 	int duration;
 	bool verbose;
+#ifdef USE_LIBUNWIND
+	bool unwind;
+	int sample_ustack_size;
+#endif
 } env = {
 	.pid = -1,
 	.tid = -1,
@@ -36,6 +43,9 @@ static struct env {
 	.max_block_time = -1,
 	.state = -1,
 	.duration = 99999999,
+#ifdef USE_LIBUNWIND
+	.sample_ustack_size = SAMPLE_USTACK_SIZE,
+#endif
 };
 
 const char *argp_program_version = "offcputime 0.1";
@@ -60,6 +70,9 @@ const char argp_program_doc[] =
 #define OPT_PERF_MAX_STACK_DEPTH	1 /* --pef-max-stack-depth */
 #define OPT_STACK_STORAGE_SIZE		2 /* --stack-storage-size */
 #define OPT_STATE			3 /* --state */
+#ifdef USE_LIBUNWIND
+#define OPT_SAMPLE_STACK_SIZE		4 /* --sample-stack-size */
+#endif
 
 static const struct argp_option opts[] = {
 	{ "pid", 'p', "PID", 0, "Trace this PID only" },
@@ -77,6 +90,10 @@ static const struct argp_option opts[] = {
 	{ "max-block-time", 'M', "MAX-BLOCK-TIME", 0,
 	  "the amount of time in microseconds under which we store traces (default U64_MAX)" },
 	{ "state", OPT_STATE, "STATE", 0, "filter on this thread state bitmask (eg, 2 == TASK_UNINTERRUPTIBLE) see include/linux/sched.h" },
+#ifdef USE_LIBUNWIND
+	{ "post-unwind", 'P', NULL, 0, "post unwind" },
+	{ "sample-stack-size", OPT_SAMPLE_STACK_SIZE, "STACK-SIZE", 0, "the size of dump stack (default 128)" },
+#endif
 	{ "verbose", 'v', NULL, 0, "Verbose debug output" },
 	{ NULL, 'h', NULL, OPTION_HIDDEN, "Show the full help" },
 	{},
@@ -155,6 +172,25 @@ static error_t parse_arg(int key, char *arg, struct argp_state *state)
 			argp_usage(state);
 		}
 		break;
+#ifdef USE_LIBUNWIND
+	case 'P':
+		env.unwind = true;
+		break;
+	case OPT_SAMPLE_STACK_SIZE:
+		errno = 0;
+		env.sample_ustack_size = strtol(arg, NULL, 10);
+		if (errno) {
+			fprintf(stderr, "invalid stack size: %s\n", arg);
+			argp_usage(state);
+		}
+		if (env.sample_ustack_size > MAX_USTACK_SIZE) {
+			fprintf(stderr, "the stack size is too big, please "
+				"increase MAX_USTACK_SIZE's value and recompile");
+			argp_usage(state);
+		}
+
+		break;
+#endif
 	case ARGP_KEY_ARG:
 		if (pos_args++) {
 			fprintf(stderr,
@@ -186,13 +222,20 @@ static void sig_handler(int sig)
 }
 
 static void print_map(struct ksyms *ksyms, struct syms_cache *syms_cache,
-		      struct offcputime_bpf *obj)
+		      struct offcputime_bpf *obj
+#ifdef USE_LIBUNWIND
+		      , struct unw_info *u
+#endif
+		      )
 {
 	struct key_t lookup_key = {}, next_key;
 	const struct ksym *ksym;
 	const struct syms *syms;
 	const struct sym *sym;
 	int err, i, ifd, sfd;
+#ifdef USE_LIBUNWIND
+	int sample_fd = 0, ustack_fd = 0;
+#endif
 	unsigned long *ip;
 	struct val_t val;
 	char *dso_name;
@@ -207,6 +250,12 @@ static void print_map(struct ksyms *ksyms, struct syms_cache *syms_cache,
 
 	ifd = bpf_map__fd(obj->maps.info);
 	sfd = bpf_map__fd(obj->maps.stackmap);
+#ifdef USE_LIBUNWIND
+	if (env.unwind) {
+		sample_fd = bpf_map__fd(obj->maps.samples);
+		ustack_fd = bpf_map__fd(obj->maps.ustacks);
+	}
+#endif
 	while (!bpf_map_get_next_key(ifd, &lookup_key, &next_key)) {
 		idx = 0;
 
@@ -239,10 +288,22 @@ print_ustack:
 		if (next_key.user_stack_id == -1)
 			goto skip_ustack;
 
-		if (bpf_map_lookup_elem(sfd, &next_key.user_stack_id, ip) != 0) {
-			fprintf(stderr, "    [Missed User Stack]\n");
-			goto skip_ustack;
+#ifdef USE_LIBUNWIND
+		if (env.unwind) {
+			if (post_unwind(u, sample_fd, ustack_fd, next_key.user_stack_id,
+					ip, env.perf_max_stack_depth) != 0) {
+				fprintf(stderr, "    [Missed User Stack]\n");
+				goto skip_ustack;
+			}
+		} else {
+#endif
+			if (bpf_map_lookup_elem(sfd, &next_key.user_stack_id, ip) != 0) {
+				fprintf(stderr, "    [Missed User Stack]\n");
+				goto skip_ustack;
+			}
+#ifdef USE_LIBUNWIND
 		}
+#endif
 
 		syms = syms_cache__get_syms(syms_cache, next_key.tgid);
 		if (!syms) {
@@ -294,6 +355,9 @@ int main(int argc, char **argv)
 	struct ksyms *ksyms = NULL;
 	struct offcputime_bpf *obj;
 	int err;
+#ifdef USE_LIBUNWIND
+	struct unw_info u = {0,};
+#endif
 
 	err = argp_parse(&argp, argc, argv, 0, NULL, NULL);
 	if (err)
@@ -328,6 +392,14 @@ int main(int argc, char **argv)
 				env.perf_max_stack_depth * sizeof(unsigned long));
 	bpf_map__set_max_entries(obj->maps.stackmap, env.stack_storage_size);
 
+#ifdef USE_LIBUNWIND
+	if (env.unwind) {
+		obj->rodata->sample_user_stack = true;
+		obj->rodata->sample_ustack_size = env.sample_ustack_size;
+		bpf_map__set_value_size(obj->maps.ustacks, env.sample_ustack_size);
+	}
+#endif
+
 	err = offcputime_bpf__load(obj);
 	if (err) {
 		fprintf(stderr, "failed to load BPF programs\n");
@@ -357,9 +429,25 @@ int main(int argc, char **argv)
 	 */
 	sleep(env.duration);
 
+#ifdef USE_LIBUNWIND
+	if (env.unwind) {
+		if (env.verbose)
+			set_log_level(DEBUG);
+
+		unw_init(&u, env.pid, env.sample_ustack_size);
+	}
+
+	print_map(ksyms, syms_cache, obj, &u);
+#else
 	print_map(ksyms, syms_cache, obj);
+#endif
 
 cleanup:
+#ifdef USE_LIBUNWIND
+	if (env.unwind) {
+		unw_deinit(&u);
+	}
+#endif
 	offcputime_bpf__destroy(obj);
 	syms_cache__free(syms_cache);
 	ksyms__free(ksyms);
