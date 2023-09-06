@@ -8,6 +8,8 @@ BPFTOOL ?= $(BPFTOOL_OUTPUT)/bootstrap/bpftool
 LIBBPF_SRC := $(abspath ../src/cc/libbpf/src)
 LIBBPF_OBJ := $(abspath $(OUTPUT)/libbpf.a)
 LIBBLAZESYM_SRC := $(abspath blazesym/target/release/libblazesym.a)
+LIBUNWIND_SRC := $(abspath ./libunwind)
+LIBUNWIND_OUTPUT := $(abspath $(OUTPUT)/libunwind)
 INCLUDES := -I$(OUTPUT) -I../src/cc/libbpf/include/uapi
 CFLAGS := -g -O2 -Wall
 BPFCFLAGS := -g -O2 -Wall
@@ -26,6 +28,12 @@ USE_BLAZESYM ?= 1
 endif
 endif
 
+ifeq ($(ARCH),x86)
+USE_LIBUNWIND = 1
+else
+USE_LIBUNWIND = 0
+endif
+
 ifeq ($(wildcard $(ARCH)/),)
 $(error Architecture $(ARCH) is not supported yet. Please open an issue)
 endif
@@ -33,6 +41,10 @@ endif
 BZ_APPS = \
 	memleak \
 	opensnoop \
+	#
+
+UNW_APPS = \
+	offcputime \
 	#
 
 APPS = \
@@ -65,7 +77,6 @@ APPS = \
 	mdflush \
 	mountsnoop \
 	numamove \
-	offcputime \
 	oomkill \
 	readahead \
 	runqlat \
@@ -89,6 +100,7 @@ APPS = \
 	vfsstat \
 	wakeuptime \
 	$(BZ_APPS) \
+	$(UNW_APPS) \
 	#
 
 # export variables that are used in Makefile.btfgen as well.
@@ -114,6 +126,12 @@ ifeq ($(USE_BLAZESYM),1)
 COMMON_OBJ += \
 	$(OUTPUT)/libblazesym.a \
 	$(OUTPUT)/blazesym.h \
+	#
+endif
+
+ifeq ($(USE_LIBUNWIND),1)
+COMMON_OBJ += \
+	$(OUTPUT)/unwind_helpers.o \
 	#
 endif
 
@@ -152,6 +170,13 @@ ifeq ($(USE_BLAZESYM),1)
 LDFLAGS += $(OUTPUT)/libblazesym.a -lrt -lpthread -ldl
 endif
 
+ifeq ($(USE_LIBUNWIND),1)
+CFLAGS += -DUSE_LIBUNWIND=1
+LIBUNWIND_LIB = $(LIBUNWIND_OUTPUT)/lib
+LIBUNWIND_OBJ = $(LIBUNWIND_LIB)/libunwind.a
+LIBUNWIND_LDFLAGS = $(LIBUNWIND_LIB)/libunwind-ptrace.a $(LIBUNWIND_LIB)/libunwind-generic.a $(LIBUNWIND_LIB)/libunwind.a -llzma
+endif
+
 .PHONY: clean
 clean:
 	$(call msg,CLEAN)
@@ -168,7 +193,7 @@ $(OUTPUT)/blazesym.h: $(LIBBLAZESYM_SRC) | $(OUTPUT)
 	$(call msg,INC,$@)
 	$(Q)cp blazesym/target/release/blazesym.h $@
 
-$(OUTPUT) $(OUTPUT)/libbpf $(BPFTOOL_OUTPUT):
+$(OUTPUT) $(OUTPUT)/libbpf $(BPFTOOL_OUTPUT) $(LIBUNWIND_OUTPUT):
 	$(call msg,MKDIR,$@)
 	$(Q)mkdir -p $@
 
@@ -178,17 +203,21 @@ $(BPFTOOL): | $(BPFTOOL_OUTPUT)
 
 $(APPS): %: $(OUTPUT)/%.o $(COMMON_OBJ) $(LIBBPF_OBJ) | $(OUTPUT)
 	$(call msg,BINARY,$@)
-	$(Q)$(CC) $(CFLAGS) $^ $(LDFLAGS) -lelf -lz -o $@
+	$(Q)$(CC) $(CFLAGS) $^ $(LDFLAGS) -lelf -lz $(LIBUNWIND_LDFLAGS) -o $@
 
 ifeq ($(USE_BLAZESYM),1)
 $(patsubst %,$(OUTPUT)/%.o,$(BZ_APPS)): $(OUTPUT)/blazesym.h
 endif
 
+ifeq ($(USE_LIBUNWIND),1)
+$(patsubst %,$(OUTPUT)/%.o,$(UNW_APPS)): $(LIBUNWIND_OBJ) unwind_types.h
+endif
+
 $(patsubst %,$(OUTPUT)/%.o,$(APPS)): %.o: %.skel.h
 
-$(OUTPUT)/%.o: %.c $(wildcard %.h) $(LIBBPF_OBJ) | $(OUTPUT)
+$(OUTPUT)/%.o: %.c $(wildcard *.h) $(LIBBPF_OBJ) | $(OUTPUT)
 	$(call msg,CC,$@)
-	$(Q)$(CC) $(CFLAGS) $(INCLUDES) -c $(filter %.c,$^) -o $@
+	$(Q)$(CC) $(CFLAGS) -D__TARGET_ARCH_$(ARCH) $(INCLUDES) -c $(filter %.c,$^) -o $@
 
 $(OUTPUT)/%.skel.h: $(OUTPUT)/%.bpf.o | $(OUTPUT) $(BPFTOOL)
 	$(call msg,GEN-SKEL,$@)
@@ -217,6 +246,12 @@ $(LIBBPF_OBJ): $(wildcard $(LIBBPF_SRC)/*.[ch]) | $(OUTPUT)/libbpf
 		    OBJDIR=$(dir $@)libbpf DESTDIR=$(dir $@)		      \
 		    INCLUDEDIR= LIBDIR= UAPIDIR=			      \
 		    install
+
+# Build libunwind.a
+$(LIBUNWIND_OBJ): $(wildcard $(LIBUNWIND_SRC)/src/*.[ch]) | $(LIBUNWIND_OUTPUT)
+	$(Q)cd libunwind && autoreconf -i && ./configure --prefix=$(LIBUNWIND_OUTPUT)
+	$(Q)$(MAKE) -C $(LIBUNWIND_SRC)
+	$(Q)$(MAKE) -C $(LIBUNWIND_SRC) install
 
 $(FSSLOWER_ALIASES): fsslower
 	$(call msg,SYMLINK,$@)
