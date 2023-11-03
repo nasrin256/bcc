@@ -3,6 +3,10 @@
 #define __UNWIND_TYPES_H
 
 #define MAX_USTACK_SIZE			4096
+#define SAMPLES_MAP			samples
+#define SAMPLES_MAP_STR			"samples"
+#define USTACKS_MAP			ustacks
+#define USTACKS_MAP_STR			"ustacks"
 
 #if defined(__TARGET_ARCH_arm64)
 struct user_regs {
@@ -50,11 +54,4 @@ struct sample_data {
 	regs_dump_t user_regs;
 	stack_dump_t user_stack;
 };
-
-struct unw_data {
-	pid_t pid; /* field of struct UPT_info to use ready-to-use callbacks of UPT_accessors */
-	regs_dump_t user_regs;
-	stack_dump_t user_stack;
-};
-
 #endif /* __UNWIND_TYPES_H */

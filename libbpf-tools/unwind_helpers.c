@@ -21,8 +21,27 @@
 #include <dirent.h>
 #include "unwind_helpers.h"
 
-/* default */
-static enum log_level log_level = ERROR;
+/* for internal logs */
+#define p_debug(fmt, ...) __p(DEBUG, "Debug", fmt, ##__VA_ARGS__)
+#define p_info(fmt, ...) __p(INFO, "Info", fmt, ##__VA_ARGS__)
+#define p_warn(fmt, ...) __p(WARN, "Warn", fmt, ##__VA_ARGS__)
+#define p_err(fmt, ...) __p(ERROR, "Error", fmt, ##__VA_ARGS__)
+
+enum log_level {
+	DEBUG,
+	INFO,
+	WARN,
+	ERROR,
+};
+
+static struct sample_data *g_sample;
+static size_t sample_ustack_size;
+struct bpf_object *bpf_obj;
+
+/*
+ * default log level can be changed as needed.
+ */
+static enum log_level log_level = WARN;
 
 void __p(enum log_level level, char *level_str, char *fmt, ...)
 {
@@ -37,18 +56,6 @@ void __p(enum log_level level, char *level_str, char *fmt, ...)
         fflush(stderr);
 }
 
-void set_log_level(enum log_level level)
-{
-        log_level = level;
-}
-
-#define p_debug(fmt, ...) __p(DEBUG, "Debug", fmt, ##__VA_ARGS__)
-#define p_info(fmt, ...) __p(INFO, "Info", fmt, ##__VA_ARGS__)
-#define p_warn(fmt, ...) __p(WARN, "Warn", fmt, ##__VA_ARGS__)
-#define p_err(fmt, ...) __p(ERROR, "Error", fmt, ##__VA_ARGS__)
-
-static struct unw_info *u;
-
 /*
  * libunwind address space for post unwinding
  */
@@ -57,10 +64,12 @@ static int ptrace_access_mem (unw_word_t addr, unw_word_t *val, int write, pid_t
 	int i, end;
 	unw_word_t tmp_val;
 
-	// Some 32-bit archs have to define a 64-bit unw_word_t.
-	// Callers of this function therefore expect a 64-bit
-	// return value, but ptrace only returns a 32-bit value
-	// in such cases.
+	/*
+	 * Some 32-bit archs have to define a 64-bit unw_word_t.
+	 * Callers of this function therefore expect a 64-bit
+	 * return value, but ptrace only returns a 32-bit value
+	 * in such cases.
+	 */
 	if (sizeof(long) == 4 && sizeof(unw_word_t) == 8)
 		end = 2;
 	else
@@ -104,16 +113,7 @@ static int ptrace_access_mem (unw_word_t addr, unw_word_t *val, int write, pid_t
 	return 0;
 }
 
-#if defined(__TARGET_ARCH_arm64)
-static inline void* uc_addr (unsigned long uc[], int reg)
-{
-	if (reg >= UNW_AARCH64_X0 && reg < UNW_AARCH64_V0)
-		return &uc[reg];
-	else
-		/* TODO: check need to handle "reg >= UNW_AARCH64_V0 && reg <= UNW_AARCH64_V31" cases */
-		return NULL;
-}
-#elif defined(__TARGET_ARCH_x86)
+#if defined(__TARGET_ARCH_x86) || defined(__TARGET_ARCH_arm64)
 static inline void* uc_addr (unsigned long uc[], int reg)
 {
 	return &uc[reg];
@@ -122,13 +122,12 @@ static inline void* uc_addr (unsigned long uc[], int reg)
 #error This Architecture is not supported yet. Please open an issue
 #endif
 
-
 static int access_reg(unw_addr_space_t as,
 		      unw_regnum_t regnum, unw_word_t *val,
 		      int __write, void *arg) //check. arg = u?
 {
 	unw_word_t *addr;
-	struct unw_data *ud = &u->data;
+	struct sample_data *sample = g_sample;
 
 	/* Don't support write, I suspect we don't need it. */
 	if (__write) {
@@ -136,7 +135,7 @@ static int access_reg(unw_addr_space_t as,
 		return -EINVAL;
 	}
 
-	if (!(addr = uc_addr ((unsigned long*)&ud->user_regs, regnum))) {
+	if (!(addr = uc_addr ((unsigned long*)&sample->user_regs, regnum))) {
 		p_err("unwind: can't read reg %d\n", regnum);
 		return -EINVAL;
 	}
@@ -150,12 +149,14 @@ static int access_mem(unw_addr_space_t as,
 		      unw_word_t addr, unw_word_t *valp,
 		      int __write, void *arg)
 {
-	struct unw_data *ud = &u->data;
-	struct stack_dump *stack = &ud->user_stack;
+	struct sample_data *sample = g_sample;
+	struct stack_dump *stack = &sample->user_stack;
 	unw_word_t *start;
 	unw_word_t end;
 	int offset;
 	int ret;
+	//UPT_info *context = arg;
+	pid_t pid = *(pid_t*)arg;
 
 	/* Don't support write, probably not needed. */
 	if (__write || !stack) {
@@ -164,7 +165,7 @@ static int access_mem(unw_addr_space_t as,
 		return -EINVAL;
 	}
 
-	if (!(start = uc_addr ((unsigned long*)&ud->user_regs, UNW_REG_SP))) {
+	if (!(start = uc_addr ((unsigned long*)&sample->user_regs, UNW_REG_SP))) {
 		p_err("unwind: can't read reg SP\n");
 		return -EINVAL;
 	}
@@ -178,7 +179,8 @@ static int access_mem(unw_addr_space_t as,
 	}
 
 	if (addr < *start || addr + sizeof(unw_word_t) >= end) {
-		ret = ptrace_access_mem(addr, valp, __write, ud->pid);
+		//ret = ptrace_access_mem(addr, valp, __write, sample->pid);
+		ret = ptrace_access_mem(addr, valp, __write, pid);
 		if (ret) {
 			p_warn("unwind: access_mem %p not inside range"
 						 " 0x%" PRIx64 "-0x%" PRIx64 "\n",
@@ -212,48 +214,31 @@ static unw_accessors_t accessors = {
 	.get_proc_name = _UPT_get_proc_name,
 };
 
-/* libunwind initialize */
-int unw_init(struct unw_info *u, pid_t pid, size_t user_stack_size)
+static int get_entries(struct sample_data *sample, pid_t pid,
+		unsigned long *ip, int nr_ip)
 {
-	if (!u)
-		return -1;
+	unw_cursor_t cursor;
+	g_sample = sample;
+	void *context = NULL;
+	int err = 0;
+	int i = 0;
+	unw_addr_space_t as = unw_create_addr_space(&accessors, 0);
 
-	u->as = unw_create_addr_space(&accessors, 0);
+	if (!sample || !ip)
+		return -EINVAL;
 
 	if (ptrace(PTRACE_ATTACH, pid, 0, 0) != 0) {
 		p_err("ERROR: cannot attach to %d\n", pid);
 		return -1;
 	}
 
-	u->context = _UPT_create(pid);
-	u->data.pid = pid;
-	u->data.user_stack.data = (char*)malloc(user_stack_size);
+	context = _UPT_create(pid);
+	if (!context) {
+		err = -1;
+		goto cleanup;
+	}
 
-	return 0;
-}
-
-void unw_deinit(struct unw_info *u)
-{
-	if (!u)
-		return;
-
-	if (u->data.user_stack.data)
-		free(u->data.user_stack.data);
-
-	_UPT_destroy(u->context);
-	(void) ptrace(PTRACE_DETACH, u->data.pid, 0, 0);
-}
-
-static int get_entries(struct unw_info *_u, unsigned long *ip, int nr_ip)
-{
-	unw_cursor_t cursor;
-	int i = 0;
-	u = _u;
-
-	if (!u || !ip)
-		return -1;
-
-	if (unw_init_remote(&cursor, u->as, u->context) != 0) {
+	if (unw_init_remote(&cursor, as, context) != 0) {
 		p_err("ERROR: cannot initialize cursor for remote unwinding\n");
 		return -1;
 	}
@@ -268,7 +253,13 @@ static int get_entries(struct unw_info *_u, unsigned long *ip, int nr_ip)
 		ip[i++] = pc;
 	} while (unw_step(&cursor) > 0 && i < nr_ip);
 
-	return 0;
+cleanup:
+	if (context)
+		_UPT_destroy(context);
+
+	(void) ptrace(PTRACE_DETACH, pid, 0, 0);
+
+	return err;
 }
 
 static inline unw_word_t stack_pointer(unsigned long uc[])
@@ -291,40 +282,84 @@ static void dump_regs(regs_dump_t *user_regs)
 		p_debug("regs[%d]: 0x%llx\n", i, user_regs[i]);
 }
 
-int post_unwind(struct unw_info *u, int sample_fd, int ustack_fd, int ustack_id,
-		unsigned long *ip, size_t nr_ip)
+static void dump_sample(int stack_id, struct sample_data *sample)
 {
-	int err;
-	struct sample_data sample;
-	struct unw_data *ud = &u->data;
-	char *sample_ustack_data = ud->user_stack.data;
+	p_debug("post unwind for stack %d\n", stack_id);
+	dump_regs(&sample->user_regs);
+	dump_stack(sample->user_stack.data, 20);
+}
 
-	if (!u || !sample_ustack_data) {
-		p_err("post_unwind: invalid args\n");
-		return -1;
+int unw_map_lookup_and_unwind_elem(const int ustack_id, pid_t pid,
+				   unsigned long *ip, size_t nr_ip)
+{
+	int samples_map, ustacks_map;
+	struct sample_data *sample = NULL;
+	char *sample_ustack = NULL;
+	int err;
+
+	sample = (struct sample_data*)malloc(sizeof(struct sample_data));
+	if (!sample)
+		return -ENOMEM;
+
+	sample_ustack = (char*)malloc(sample_ustack_size);
+	if (!sample_ustack) {
+		err = -ENOMEM;
+		goto cleanup;
 	}
 
-	err = bpf_map_lookup_elem(sample_fd, &ustack_id, &sample);
+	samples_map = bpf_map__fd(bpf_object__find_map_by_name(bpf_obj, SAMPLES_MAP_STR));
+	if (samples_map < 0) {
+		err = samples_map;
+		goto cleanup;
+	}
+	ustacks_map = bpf_map__fd(bpf_object__find_map_by_name(bpf_obj, USTACKS_MAP_STR));
+	if (ustacks_map < 0) {
+		err = ustacks_map;
+		goto cleanup;
+	}
+
+	err = bpf_map_lookup_elem(samples_map, &ustack_id, sample);
 	if (err < 0) {
 		fprintf(stderr, "failed to lookup samples for stack %d: %d\n", ustack_id, err);
-		return -1;
+		goto cleanup;
 	}
 
-	err = bpf_map_lookup_elem(ustack_fd, &ustack_id, sample_ustack_data);
+	err = bpf_map_lookup_elem(ustacks_map, &ustack_id, sample_ustack);
 	if (err < 0) {
 		fprintf(stderr, "failed to lookup ustacks for stack %d: %d\n", ustack_id, err);
-		return -1;
+		goto cleanup;
 	}
+	sample->user_stack.data = sample_ustack;
 
-	p_debug("post unwind for stack %d\n", ustack_id);
+	dump_sample(ustack_id, sample);
 
-	dump_regs(&sample.user_regs);
-	dump_stack(sample_ustack_data, 20);
+	err = get_entries(sample, pid, ip, nr_ip);
+	if (err)
+		p_err("get_entries failded: %d\n", err);
 
-	/* set unwind data */
-	memcpy(&ud->user_regs, &sample.user_regs, sizeof(sample.user_regs));
-	memcpy(&ud->user_stack, &sample.user_stack, sizeof(sample.user_stack));
-	ud->user_stack.data = sample_ustack_data;
+cleanup:
+	if (sample->user_stack.data)
+		free(sample->user_stack.data);
+	if (sample)
+		free(sample);
 
-	return get_entries(u, ip, nr_ip);
+	return err;
+}
+
+int unw_map__set(struct bpf_object *obj, size_t ustack_size, size_t max_entries)
+{
+	struct bpf_map *samples_map = bpf_object__find_map_by_name(obj, SAMPLES_MAP_STR);
+	struct bpf_map *ustacks_map = bpf_object__find_map_by_name(obj, USTACKS_MAP_STR);
+
+	if (samples_map < 0 || ustacks_map < 0)
+		return -EINVAL;
+
+	bpf_map__set_max_entries(samples_map, max_entries);
+	bpf_map__set_value_size(ustacks_map, ustack_size);
+	bpf_map__set_max_entries(ustacks_map, max_entries);
+
+	sample_ustack_size = ustack_size;
+	bpf_obj = obj;
+
+	return 0;
 }

@@ -17,8 +17,7 @@ const volatile __u64 min_block_ns = 1;
 const volatile pid_t targ_tgid = -1;
 const volatile pid_t targ_pid = -1;
 const volatile long state = -1;
-const volatile bool sample_user_stack = false;
-const volatile unsigned long sample_ustack_size = SAMPLE_USTACK_SIZE;
+
 
 struct internal_key {
 	u64 start_ts;
@@ -85,8 +84,7 @@ int BPF_PROG(sched_switch, bool preempt, struct task_struct *prev, struct task_s
 							BPF_F_USER_STACK);
 			} else {
 				i_key.key.user_stack_id =
-					get_user_stackid((struct pt_regs *)ctx,
-							 sample_ustack_size);
+					get_user_stackid();
 			}
 		}
 		i_key.key.kern_stack_id = bpf_get_stackid(ctx, &stackmap, 0);

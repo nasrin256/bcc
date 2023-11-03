@@ -3,9 +3,6 @@
 #define __OFFCPUTIME_H
 
 #define TASK_COMM_LEN		16
-#ifdef USE_LIBUNWIND
-#define SAMPLE_USTACK_SIZE	128
-#endif
 
 struct key_t {
 	__u32 pid;

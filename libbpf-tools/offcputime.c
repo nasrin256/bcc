@@ -12,11 +12,11 @@
 #include <bpf/libbpf.h>
 #include <bpf/bpf.h>
 #include "offcputime.h"
+#include "offcputime.skel.h"
+#include "trace_helpers.h"
 #ifdef USE_LIBUNWIND
 #include "unwind_helpers.h"
 #endif
-#include "offcputime.skel.h"
-#include "trace_helpers.h"
 
 static struct env {
 	pid_t pid;
@@ -44,7 +44,7 @@ static struct env {
 	.state = -1,
 	.duration = 99999999,
 #ifdef USE_LIBUNWIND
-	.sample_ustack_size = SAMPLE_USTACK_SIZE,
+	.sample_ustack_size = 128,
 #endif
 };
 
@@ -222,20 +222,13 @@ static void sig_handler(int sig)
 }
 
 static void print_map(struct ksyms *ksyms, struct syms_cache *syms_cache,
-		      struct offcputime_bpf *obj
-#ifdef USE_LIBUNWIND
-		      , struct unw_info *u
-#endif
-		      )
+		      struct offcputime_bpf *obj)
 {
 	struct key_t lookup_key = {}, next_key;
 	const struct ksym *ksym;
 	const struct syms *syms;
 	const struct sym *sym;
 	int err, i, ifd, sfd;
-#ifdef USE_LIBUNWIND
-	int sample_fd = 0, ustack_fd = 0;
-#endif
 	unsigned long *ip;
 	struct val_t val;
 	char *dso_name;
@@ -250,12 +243,7 @@ static void print_map(struct ksyms *ksyms, struct syms_cache *syms_cache,
 
 	ifd = bpf_map__fd(obj->maps.info);
 	sfd = bpf_map__fd(obj->maps.stackmap);
-#ifdef USE_LIBUNWIND
-	if (env.unwind) {
-		sample_fd = bpf_map__fd(obj->maps.samples);
-		ustack_fd = bpf_map__fd(obj->maps.ustacks);
-	}
-#endif
+
 	while (!bpf_map_get_next_key(ifd, &lookup_key, &next_key)) {
 		idx = 0;
 
@@ -290,21 +278,20 @@ print_ustack:
 
 #ifdef USE_LIBUNWIND
 		if (env.unwind) {
-			if (post_unwind(u, sample_fd, ustack_fd, next_key.user_stack_id,
-					ip, env.perf_max_stack_depth) != 0) {
+			if (unw_map_lookup_and_unwind_elem(next_key.user_stack_id, next_key.pid,
+							   ip, env.perf_max_stack_depth) != 0) {
 				fprintf(stderr, "    [Missed User Stack]\n");
 				goto skip_ustack;
 			}
-		} else {
-#endif
-			if (bpf_map_lookup_elem(sfd, &next_key.user_stack_id, ip) != 0) {
-				fprintf(stderr, "    [Missed User Stack]\n");
-				goto skip_ustack;
-			}
-#ifdef USE_LIBUNWIND
+			goto sym_resolve;
 		}
 #endif
+		if (bpf_map_lookup_elem(sfd, &next_key.user_stack_id, ip) != 0) {
+			fprintf(stderr, "    [Missed User Stack]\n");
+			goto skip_ustack;
+		}
 
+sym_resolve:
 		syms = syms_cache__get_syms(syms_cache, next_key.tgid);
 		if (!syms) {
 			if (!env.verbose) {
@@ -353,9 +340,6 @@ int main(int argc, char **argv)
 	struct ksyms *ksyms = NULL;
 	struct offcputime_bpf *obj;
 	int err;
-#ifdef USE_LIBUNWIND
-	struct unw_info u = {0,};
-#endif
 
 	err = argp_parse(&argp, argc, argv, 0, NULL, NULL);
 	if (err)
@@ -392,9 +376,10 @@ int main(int argc, char **argv)
 
 #ifdef USE_LIBUNWIND
 	if (env.unwind) {
-		obj->rodata->sample_user_stack = true;
-		obj->rodata->sample_ustack_size = env.sample_ustack_size;
-		bpf_map__set_value_size(obj->maps.ustacks, env.sample_ustack_size);
+		if (UNW_SET_ENV(obj, env.sample_ustack_size, 1024) < 0) {
+			fprintf(stderr, "failed to set env to unwind_helpers\n");
+			goto cleanup;
+		}
 	}
 #endif
 
@@ -427,25 +412,9 @@ int main(int argc, char **argv)
 	 */
 	sleep(env.duration);
 
-#ifdef USE_LIBUNWIND
-	if (env.unwind) {
-		if (env.verbose)
-			set_log_level(DEBUG);
-
-		unw_init(&u, env.pid, env.sample_ustack_size);
-	}
-
-	print_map(ksyms, syms_cache, obj, &u);
-#else
 	print_map(ksyms, syms_cache, obj);
-#endif
 
 cleanup:
-#ifdef USE_LIBUNWIND
-	if (env.unwind) {
-		unw_deinit(&u);
-	}
-#endif
 	offcputime_bpf__destroy(obj);
 	syms_cache__free(syms_cache);
 	ksyms__free(ksyms);
