@@ -393,6 +393,29 @@ static void print_kernel_stacktrace_folded(unsigned long *ip, struct ksyms *ksym
 	}
 }
 
+/* it
+struct it {
+	bool reverse;
+	int cur_idx;
+	unsigned long *ip;
+	void *syms;
+	}
+
+begin(it, reverse, syms) {
+	it.reverse =
+	it.cur_idx =
+	it.syms = syms
+}
+next(it, sym) {
+	sym = get sym for cur_idx from syms
+	update it.cur_idx
+
+	if end:
+		return false
+	return true
+}
+*/
+
 static void print_count(struct key_t *event, __u64 count, int sfd,
 			struct ksyms *ksyms, struct syms_cache *syms_cache)
 {
@@ -408,8 +431,14 @@ static void print_count(struct key_t *event, __u64 count, int sfd,
 	if (!env.user_stacks_only && !STACK_ID_EFAULT(event->kern_stack_id)) {
 		if (bpf_map_lookup_elem(sfd, &event->kern_stack_id, ip) != 0)
 			printf("    [Missed Kernel Stack]\n");
-		else
-			print_kernel_stacktrace(ip, ksyms);
+		else {
+			//print_kernel_stacktrace(ip, ksyms);
+			struct sym_iterator it;
+			begin(it, false, ip, ksyms);
+
+			for (it, it, next(it, ksym))
+				printf("format", ksym.name, ksym.offset);
+		}
 	}
 
 	/* user stack */
@@ -419,8 +448,14 @@ static void print_count(struct key_t *event, __u64 count, int sfd,
 
 		if (bpf_map_lookup_elem(sfd, &event->user_stack_id, ip) != 0)
 			printf("    [Missed User Stack]\n");
-		else
-			print_user_stacktrace(ip, syms_cache, event->pid);
+		else {
+			//print_user_stacktrace(ip, syms_cache, event->pid);
+			struct sym_iterator it;
+			begin(it, false, ip, syms);
+
+			for (it, it, next(it, sym))
+				printf("format", sym.name, sym.offset);
+		}
 	}
 
 	printf("    %-16s %s (%d)\n", "-", event->name, event->pid);
@@ -446,8 +481,14 @@ static void print_count_folded(struct key_t *event, __u64 count, int sfd,
 	if (!env.kernel_stacks_only && !STACK_ID_EFAULT(event->user_stack_id)) {
 		if (bpf_map_lookup_elem(sfd, &event->user_stack_id, ip) != 0)
 			printf(";[Missed User Stack]");
-		else
-			print_user_stacktrace_folded(ip, syms_cache, event->pid);
+		else {
+			//print_user_stacktrace_folded(ip, syms_cache, event->pid);
+			struct sym_iterator it;
+			begin(it, true, ip, syms);
+
+			for (it, it, next(it, sym))
+				printf("format", sym.name, sym.offset);
+		}
 	}
 
 	/* kernel stack */
@@ -457,8 +498,14 @@ static void print_count_folded(struct key_t *event, __u64 count, int sfd,
 
 		if (bpf_map_lookup_elem(sfd, &event->kern_stack_id, ip) != 0)
 			printf(";[Missed Kernel Stack]");
-		else
-			print_kernel_stacktrace_folded(ip, ksyms);
+		else {
+			//print_kernel_stacktrace_folded(ip, ksyms);
+			struct sym_iterator it;
+			begin(it, true, ip, syms);
+
+			for (it, it, next(it, sym))
+				printf("format", sym.name, sym.offset);
+		}
 	}
 
 	printf(" %lld\n", count);
