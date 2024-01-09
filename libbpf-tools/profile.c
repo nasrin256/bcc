@@ -393,33 +393,70 @@ static void print_kernel_stacktrace_folded(unsigned long *ip, struct ksyms *ksym
 	}
 }
 
-/* it
-struct it {
+enum syms_type {
+	SYMS_CACHE,
+	KSYMS,
+	BLAZESYM,
+};
+
+/* it */
+struct iterator {
 	bool reverse;
 	int cur_idx;
 	unsigned long *ip;
+	enum syms_type syms_type;
 	void *syms;
+	void *sym;
+};
+
+int begin(struct iterator *it, bool reverse, unsigned long *ip, enum syms_type type, void *syms) {
+	int i;
+
+	it->reverse = reverse;
+	it->ip = ip;
+	it->syms_type = type;
+	it->syms = syms;
+
+	if (!it->reverse) {
+		it->cur_idx = 0;
+	} else {
+		for (i = env.perf_max_stack_depth - 1; ip[i] == 0; i--)
+			;
+		it->cur_idx = i;
+	}
+}
+
+int next(struct iterator *it) {
+
+	if (it->syms_type == KSYMS) {
+		struct ksyms *ksyms = it->syms;
+		it->sym = (void*)ksyms__map_addr(ksyms, it->ip[it->cur_idx]);
+	} else if (it->syms_type == SYMS_CACHE) {
+		struct syms *syms = it->syms;
+		it->sym = (void*)syms__map_addr(syms, it->ip[it->cur_idx]);
 	}
 
-begin(it, reverse, syms) {
-	it.reverse =
-	it.cur_idx =
-	it.syms = syms
+	if (it->reverse)
+		it->cur_idx--;
+	else
+		it->cur_idx++;
 }
-next(it, sym) {
-	sym = get sym for cur_idx from syms
-	update it.cur_idx
 
-	if end:
-		return false
-	return true
+int end(struct iterator *it) {
+	if (it->reverse)
+		return it->cur_idx < 0;
+	else
+		return (it->cur_idx >= env.perf_max_stack_depth) || (it->ip[it->cur_idx] == 0);
 }
-*/
 
 static void print_count(struct key_t *event, __u64 count, int sfd,
 			struct ksyms *ksyms, struct syms_cache *syms_cache)
 {
 	unsigned long *ip;
+	struct iterator it;
+	//const struct ksym *ksym;
+	struct ksym *ksym;
+	struct sym *sym;
 
 	ip = calloc(env.perf_max_stack_depth, sizeof(*ip));
 	if (!ip) {
@@ -432,12 +469,12 @@ static void print_count(struct key_t *event, __u64 count, int sfd,
 		if (bpf_map_lookup_elem(sfd, &event->kern_stack_id, ip) != 0)
 			printf("    [Missed Kernel Stack]\n");
 		else {
-			//print_kernel_stacktrace(ip, ksyms);
-			struct sym_iterator it;
-			begin(it, false, ip, ksyms);
+			begin(&it, false, ip, KSYMS, ksyms);
 
-			for (it, it, next(it, ksym))
-				printf("format", ksym.name, ksym.offset);
+			for (; !end(&it); next(&it)) {
+				ksym = it.sym;
+				printf("    %s\n", ksym ? ksym->name : "unknown");
+			}
 		}
 	}
 
@@ -449,12 +486,19 @@ static void print_count(struct key_t *event, __u64 count, int sfd,
 		if (bpf_map_lookup_elem(sfd, &event->user_stack_id, ip) != 0)
 			printf("    [Missed User Stack]\n");
 		else {
-			//print_user_stacktrace(ip, syms_cache, event->pid);
-			struct sym_iterator it;
-			begin(it, false, ip, syms);
+			const struct syms *syms = syms_cache__get_syms(syms_cache, event->pid);
 
-			for (it, it, next(it, sym))
-				printf("format", sym.name, sym.offset);
+			if (!syms) {
+				fprintf(stderr, "failed to get syms\n");
+				return;
+			}
+
+			begin(&it, false, ip, SYMS_CACHE, syms);
+
+			for (; !end(&it); next(&it)) {
+				sym = it.sym;
+				printf("    %s\n", sym ? sym->name : "[unknown]");
+			}
 		}
 	}
 
@@ -482,12 +526,14 @@ static void print_count_folded(struct key_t *event, __u64 count, int sfd,
 		if (bpf_map_lookup_elem(sfd, &event->user_stack_id, ip) != 0)
 			printf(";[Missed User Stack]");
 		else {
-			//print_user_stacktrace_folded(ip, syms_cache, event->pid);
+			print_user_stacktrace_folded(ip, syms_cache, event->pid);
+#if 0
 			struct sym_iterator it;
 			begin(it, true, ip, syms);
 
 			for (it, it, next(it, sym))
 				printf("format", sym.name, sym.offset);
+#endif
 		}
 	}
 
@@ -499,12 +545,14 @@ static void print_count_folded(struct key_t *event, __u64 count, int sfd,
 		if (bpf_map_lookup_elem(sfd, &event->kern_stack_id, ip) != 0)
 			printf(";[Missed Kernel Stack]");
 		else {
-			//print_kernel_stacktrace_folded(ip, ksyms);
+			print_kernel_stacktrace_folded(ip, ksyms);
+#if 0
 			struct sym_iterator it;
 			begin(it, true, ip, syms);
 
 			for (it, it, next(it, sym))
 				printf("format", sym.name, sym.offset);
+#endif
 		}
 	}
 
