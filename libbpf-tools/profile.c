@@ -409,7 +409,7 @@ struct iterator {
 	void *sym;
 };
 
-int begin(struct iterator *it, bool reverse, unsigned long *ip, enum syms_type type, void *syms) {
+int _begin(struct iterator *it, bool reverse, unsigned long *ip, enum syms_type type, void *syms) {
 	int i;
 
 	it->reverse = reverse;
@@ -424,6 +424,14 @@ int begin(struct iterator *it, bool reverse, unsigned long *ip, enum syms_type t
 			;
 		it->cur_idx = i;
 	}
+}
+
+int begin(struct iterator *it, unsigned long *ip, enum syms_type type, void *syms) {
+	_begin(it, false, ip, type, syms);
+}
+
+int begin_reverse(struct iterator *it, unsigned long *ip, enum syms_type type, void *syms) {
+	_begin(it, true, ip, type, syms);
 }
 
 int next(struct iterator *it) {
@@ -469,9 +477,7 @@ static void print_count(struct key_t *event, __u64 count, int sfd,
 		if (bpf_map_lookup_elem(sfd, &event->kern_stack_id, ip) != 0)
 			printf("    [Missed Kernel Stack]\n");
 		else {
-			begin(&it, false, ip, KSYMS, ksyms);
-
-			for (; !end(&it); next(&it)) {
+			for (begin(&it, ip, KSYMS, ksyms); !end(&it); next(&it)) {
 				ksym = it.sym;
 				printf("    %s\n", ksym ? ksym->name : "unknown");
 			}
@@ -493,9 +499,7 @@ static void print_count(struct key_t *event, __u64 count, int sfd,
 				return;
 			}
 
-			begin(&it, false, ip, SYMS_CACHE, syms);
-
-			for (; !end(&it); next(&it)) {
+			for (begin_reverse(&it, ip, SYMS_CACHE, syms); !end(&it); next(&it)) {
 				sym = it.sym;
 				printf("    %s\n", sym ? sym->name : "[unknown]");
 			}
