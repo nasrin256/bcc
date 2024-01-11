@@ -281,28 +281,10 @@ static bool read_counts_map(int fd, struct key_ext_t *items, __u32 *count)
 	return true;
 }
 
-static void print_user_stacktrace(unsigned long *ip,
-				  struct syms_cache *syms_cache,
-				  pid_t pid)
-{
-	int i;
-	const struct sym *sym;
-	const struct syms *syms = syms_cache__get_syms(syms_cache, pid);
-
-	if (!syms) {
-		fprintf(stderr, "failed to get syms\n");
-		return;
-	}
-
-	for (i = 0; ip[i] && i < env.perf_max_stack_depth; i++) {
-		sym = syms__map_addr(syms, ip[i]);
-		printf("    %s\n", sym ? sym->name : "[unknown]");
-	}
-}
-
-static void print_user_stacktrace_folded(unsigned long *ip,
-					 struct syms_cache *syms_cache,
-					 pid_t pid)
+static void _print_user_stacktrace(unsigned long *ip,
+				 struct syms_cache *syms_cache,
+				 pid_t pid,
+				int start, int end, int inc, char *prefix)
 {
 	int i;
 	const struct sym *sym;
@@ -311,7 +293,7 @@ static void print_user_stacktrace_folded(unsigned long *ip,
 	if (!syms)
 		return;
 
-	for (i = env.perf_max_stack_depth - 1; i >= 0; i--) {
+	for (i = start; i != end; i += inc) {
 		if (ip[i] == 0)
 			continue;
 
@@ -320,29 +302,40 @@ static void print_user_stacktrace_folded(unsigned long *ip,
 	}
 }
 
-static void print_kernel_stacktrace(unsigned long *ip, struct ksyms *ksyms)
+static void print_user_stacktrace(unsigned long *ip,
+				  struct syms_cache *syms_cache,
+				  pid_t pid, bool folded)
 {
-	int i;
-	const struct ksym *ksym;
-
-	for (i = 0; ip[i] && i < env.perf_max_stack_depth; i++) {
-		ksym = ksyms__map_addr(ksyms, ip[i]);
-		printf("    %s\n", ksym ? ksym->name : "unknown");
-	}
+	if (folded)
+		_print_user_stacktrace(ip, syms_cache, pid,
+				       0, env.perf_max_stack_depth, 1, ";");
+	else
+		_print_user_stacktrace(ip, syms_cache, pid,
+				       env.perf_max_stack_depth - 1, -1, -1, "\t");
 }
 
-static void print_kernel_stacktrace_folded(unsigned long *ip, struct ksyms *ksyms)
+static void _print_kernel_stacktrace(unsigned long *ip, struct ksyms *ksyms,
+			     int start, int end, int inc, char *prefix)
 {
 	int i;
 	const struct ksym *ksym;
 
-	for (i = env.perf_max_stack_depth - 1; i >= 0; i--) {
+	for (i = start; i != end; i += inc) {
 		if (ip[i] == 0)
 			continue;
 
 		ksym = ksyms__map_addr(ksyms, ip[i]);
-		printf(";%s", ksym ? ksym->name : "[unknown]");
+		printf("%s%s", prefix, ksym ? ksym->name : "[unknown]");
 	}
+}
+
+static void print_kernel_stacktrace(unsigned long *ip, struct ksyms *ksyms,
+				    bool folded)
+{
+	if (folded)
+		_print_kernel_stacktrace(ip, ksyms, 0, env.perf_max_stack_depth, 1, ";");
+	else
+		_print_kernel_stacktrace(ip, ksyms, env.perf_max_stack_depth - 1, -1, -1, "\t");
 }
 
 static void print_count(struct key_t *event, __u64 count, int sfd,
@@ -361,7 +354,7 @@ static void print_count(struct key_t *event, __u64 count, int sfd,
 		if (bpf_map_lookup_elem(sfd, &event->kern_stack_id, ip) != 0)
 			printf("    [Missed Kernel Stack]\n");
 		else
-			print_kernel_stacktrace(ip, ksyms);
+			print_kernel_stacktrace(ip, ksyms, false);
 	}
 
 	/* user stack */
@@ -372,7 +365,7 @@ static void print_count(struct key_t *event, __u64 count, int sfd,
 		if (bpf_map_lookup_elem(sfd, &event->user_stack_id, ip) != 0)
 			printf("    [Missed User Stack]\n");
 		else
-			print_user_stacktrace(ip, syms_cache, event->pid);
+			print_user_stacktrace(ip, syms_cache, event->pid, false);
 	}
 
 	printf("    %-16s %s (%d)\n", "-", event->name, event->pid);
@@ -399,7 +392,7 @@ static void print_count_folded(struct key_t *event, __u64 count, int sfd,
 		if (bpf_map_lookup_elem(sfd, &event->user_stack_id, ip) != 0)
 			printf(";[Missed User Stack]");
 		else
-			print_user_stacktrace_folded(ip, syms_cache, event->pid);
+			print_user_stacktrace(ip, syms_cache, event->pid, true);
 	}
 
 	/* kernel stack */
@@ -410,7 +403,7 @@ static void print_count_folded(struct key_t *event, __u64 count, int sfd,
 		if (bpf_map_lookup_elem(sfd, &event->kern_stack_id, ip) != 0)
 			printf(";[Missed Kernel Stack]");
 		else
-			print_kernel_stacktrace_folded(ip, ksyms);
+			print_kernel_stacktrace(ip, ksyms, true);
 	}
 
 	printf(" %lld\n", count);
