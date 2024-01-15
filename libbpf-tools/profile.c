@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: (LGPL-2.1 OR BSD-2-Clause)
-// Copyright (c) 2022 LG Electronics
-//
-// Based on profile(8) from BCC by Brendan Gregg and others.
-// 28-Dec-2021   Eunseon Lee   Created this.
+/* Copyright (c) 2022 LG Electronics
+ *
+ * Based on profile from BCC by Brendan Gregg and others.
+ * 28-Dec-2021   Eunseon Lee   Created this.
+ */
 #include <argp.h>
 #include <signal.h>
 #include <stdio.h>
@@ -17,6 +18,17 @@
 #include "profile.h"
 #include "profile.skel.h"
 #include "trace_helpers.h"
+
+/*
+ * -EFAULT in get_stackid normally means the stack-trace is not available,
+ * Such as getting kernel stack trace in userspace code
+ */
+#define STACK_ID_EFAULT(stack_id)	(stack_id == -EFAULT)
+
+#define STACK_ID_ERR(stack_id)		((stack_id < 0) && !STACK_ID_EFAULT(stack_id))
+
+#define NEED_DELIMITER(delimiter, ustack_id, kstack_id) \
+	(delimiter && ustack_id >= 0 && kstack_id >= 0)
 
 /* This structure combines key_t and count which should be sorted together */
 struct key_ext_t {
@@ -48,19 +60,6 @@ static struct env {
 	.sample_freq = 49,
 	.cpu = -1,
 };
-
-/*
- * -EFAULT in get_stackid normally means the stack-trace is not available,
- * Such as getting kernel stack trace in userspace code
- */
-#define STACK_ID_EFAULT(stack_id)	(stack_id == -EFAULT)
-
-#define STACK_ID_ERR(stack_id)		((stack_id < 0) && !STACK_ID_EFAULT(stack_id))
-
-#define NEED_DELIMITER(delimiter, ustack_id, kstack_id) \
-	(delimiter && ustack_id >= 0 && kstack_id >= 0)
-
-typedef const char* (*symname_fn_t)(unsigned long);
 
 const char *argp_program_version = "profile 0.1";
 const char *argp_program_bug_address =
@@ -101,6 +100,8 @@ static const struct argp_option opts[] = {
 	{ NULL, 'h', NULL, OPTION_HIDDEN, "Show the full help" },
 	{},
 };
+
+typedef const char* (*symname_fn_t)(unsigned long);
 
 struct ksyms *ksyms;
 struct syms *syms;
