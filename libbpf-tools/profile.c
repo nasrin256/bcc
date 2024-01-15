@@ -60,6 +60,8 @@ static struct env {
 #define NEED_DELIMITER(delimiter, ustack_id, kstack_id) \
 	(delimiter && ustack_id >= 0 && kstack_id >= 0)
 
+typedef const char* (*symname_fn_t)(unsigned long);
+
 const char *argp_program_version = "profile 0.1";
 const char *argp_program_bug_address =
 	"https://github.com/iovisor/bcc/tree/master/libbpf-tools";
@@ -99,6 +101,9 @@ static const struct argp_option opts[] = {
 	{ NULL, 'h', NULL, OPTION_HIDDEN, "Show the full help" },
 	{},
 };
+
+struct ksyms *ksyms;
+struct syms *syms;
 
 static error_t parse_arg(int key, char *arg, struct argp_state *state)
 {
@@ -271,32 +276,29 @@ static bool read_counts_map(int fd, struct key_ext_t *items, __u32 *count)
 	return true;
 }
 
-static void print_user_stacktrace(unsigned long *ip, const struct syms *syms)
+static const char *ksymname(unsigned long addr)
 {
-	const struct sym *sym;
-	int i;
+	const struct ksym *ksym = ksyms__map_addr(ksyms, addr);
 
-	for (i = 0; ip[i] && i < env.perf_max_stack_depth; i++) {
-		sym = syms__map_addr(syms, ip[i]);
-		printf("    %s\n", sym ? sym->name : "[unknown]");
-	}
+	return ksym ? ksym->name : "[unknown]";
 }
 
-static void print_kernel_stacktrace(unsigned long *ip, struct ksyms *ksyms)
+static const char *usymname(unsigned long addr)
 {
-	const struct ksym *ksym;
-	int i;
+	const struct sym *sym = syms__map_addr(syms, addr);
 
-	for (i = 0; ip[i] && i < env.perf_max_stack_depth; i++) {
-		ksym = ksyms__map_addr(ksyms, ip[i]);
-		printf("    %s\n", ksym ? ksym->name : "[unknown]");
-	}
+	return sym ? sym->name : "[unknown]";
+}
+
+static void print_stacktrace(unsigned long *ip, symname_fn_t symname)
+{
+	for (size_t i = 0; ip[i] && i < env.perf_max_stack_depth; i++)
+		printf("    %s\n", symname(ip[i]));
 }
 
 static void print_count(struct key_t *event, __u64 count, int stack_map,
 			struct ksyms *ksyms, struct syms_cache *syms_cache)
 {
-	const struct syms *syms;
 	unsigned long *ip;
 
 	ip = calloc(env.perf_max_stack_depth, sizeof(*ip));
@@ -310,7 +312,7 @@ static void print_count(struct key_t *event, __u64 count, int stack_map,
 		if (bpf_map_lookup_elem(stack_map, &event->kern_stack_id, ip) != 0)
 			printf("    [Missed Kernel Stack]\n");
 		else
-			print_kernel_stacktrace(ip, ksyms);
+			print_stacktrace(ip, ksymname);
 	}
 
 	/* user stack */
@@ -325,7 +327,7 @@ static void print_count(struct key_t *event, __u64 count, int stack_map,
 			if (!syms)
 				fprintf(stderr, "failed to get syms\n");
 			else
-				print_user_stacktrace(ip, syms);
+				print_stacktrace(ip, usymname);
 		}
 	}
 
@@ -413,7 +415,6 @@ int main(int argc, char **argv)
 		.doc = argp_program_doc,
 	};
 	struct syms_cache *syms_cache = NULL;
-	struct ksyms *ksyms = NULL;
 	struct bpf_link *links[MAX_CPU_NR] = {};
 	struct profile_bpf *obj;
 	int err, i;
