@@ -738,6 +738,17 @@ const struct sym *syms__map_addr(const struct syms *syms, unsigned long addr)
 	return dso__find_sym(dso, offset);
 }
 
+/*
+ * Determines whether `addr` is located in one of the shared objects in `syms`.
+ * If it is, it returns via `sinfo` the information about the shared object and
+ * symbol that overlaps `addr`.
+ *
+ * Returns 0 on success. If the `addr` could be matched to a DSO, but not to a
+ * symbol in the DSO, then the sinfo->sym_name and sinfo->sym_offset fields are
+ * set to NULL.
+ *
+ * Return -1 If the `addr` could not be matched to a DSO.
+ */
 int syms__map_addr_dso(const struct syms *syms, unsigned long addr,
 		       struct sym_info *sinfo)
 {
