@@ -738,6 +738,14 @@ const struct sym *syms__map_addr(const struct syms *syms, unsigned long addr)
 	return dso__find_sym(dso, offset);
 }
 
+/*
+ * Returns 0 on success; -1 on failure.  On sucess, returns via `sinfo` information
+ * about a DSO and symbol that overlaps addr.
+ *
+ * If the address specified in addr could not be matched to a DSO, then this function returns -1.
+ * If the address specified in addr could be matched to a DSO, but not to a symbol in the DSO,
+ * then the sinfo->sym_name and sinfo->sym_offset fields are set to NULL.
+ */
 int syms__map_addr_dso(const struct syms *syms, unsigned long addr,
 		       struct sym_info *sinfo)
 {

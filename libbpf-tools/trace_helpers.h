@@ -28,10 +28,13 @@ struct sym {
 };
 
 struct sym_info {
-	const char *dso_name;
-	unsigned long dso_offset;
-	const char *sym_name;
-	unsigned long sym_offset;
+	const char *dso_name;		/* Name of DSO that contains address */
+	unsigned long dso_offset;	/* Base address at which DSO
+					   is loaded */
+	const char *sym_name;		/* Name of symbol whose definition
+                                           overlaps addr */
+	unsigned long sym_offset;	/* Exact address of symbol named
+					   in dso_name */
 };
 
 struct syms;
