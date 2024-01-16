@@ -104,6 +104,7 @@ static const struct argp_option opts[] = {
 typedef const char* (*symname_fn_t)(unsigned long);
 
 struct ksyms *ksyms;
+struct syms_cache *syms_cache;
 struct syms *syms;
 
 static error_t parse_arg(int key, char *arg, struct argp_state *state)
@@ -250,6 +251,7 @@ static int cmp_counts(const void *dx, const void *dy)
 {
 	__u64 x = ((struct key_ext_t *) dx)->v;
 	__u64 y = ((struct key_ext_t *) dy)->v;
+
 	return x > y ? -1 : !(x == y);
 }
 
@@ -297,8 +299,7 @@ static void print_stacktrace(unsigned long *ip, symname_fn_t symname)
 		printf("    %s\n", symname(ip[i]));
 }
 
-static void print_count(struct key_t *event, __u64 count, int stack_map,
-			struct ksyms *ksyms, struct syms_cache *syms_cache)
+static void print_count(struct key_t *event, __u64 count, int stack_map)
 {
 	unsigned long *ip;
 
@@ -341,8 +342,7 @@ static void print_count(struct key_t *event, __u64 count, int stack_map,
 	free(ip);
 }
 
-static void print_counts(struct ksyms *ksyms, struct syms_cache *syms_cache,
-			 int counts_map, int stack_map)
+static void print_counts(int counts_map, int stack_map)
 {
 	int i;
 	struct key_t *event;
@@ -371,7 +371,7 @@ static void print_counts(struct ksyms *ksyms, struct syms_cache *syms_cache,
 			has_collision |= (event->user_stack_id == -EEXIST);
 		}
 
-		print_count(event, count, stack_map, ksyms, syms_cache);
+		print_count(event, count, stack_map);
 	}
 
 	if (missing_stacks > 0) {
@@ -415,7 +415,6 @@ int main(int argc, char **argv)
 		.parser = parse_arg,
 		.doc = argp_program_doc,
 	};
-	struct syms_cache *syms_cache = NULL;
 	struct bpf_link *links[MAX_CPU_NR] = {};
 	struct profile_bpf *obj;
 	int err, i;
@@ -492,7 +491,7 @@ int main(int argc, char **argv)
 	 */
 	sleep(env.duration);
 
-	print_counts(ksyms, syms_cache, bpf_map__fd(obj->maps.counts),
+	print_counts(bpf_map__fd(obj->maps.counts),
 		     bpf_map__fd(obj->maps.stackmap));
 
 cleanup:
