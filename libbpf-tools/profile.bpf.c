@@ -44,6 +44,7 @@ int do_perf_event(struct bpf_perf_event_data *ctx)
 
 	if (targ_pid != -1 && targ_pid != pid)
 		return 0;
+
 	if (targ_tid != -1 && targ_tid != tid)
 		return 0;
 
@@ -58,7 +59,8 @@ int do_perf_event(struct bpf_perf_event_data *ctx)
 	if (kernel_stacks_only)
 		key.user_stack_id = -1;
 	else
-		key.user_stack_id = bpf_get_stackid(&ctx->regs, &stackmap, BPF_F_USER_STACK);
+		key.user_stack_id = bpf_get_stackid(&ctx->regs, &stackmap,
+						    BPF_F_USER_STACK);
 
 	valp = bpf_map_lookup_or_try_init(&counts, &key, &zero);
 	if (valp)

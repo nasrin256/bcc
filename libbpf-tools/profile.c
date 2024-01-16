@@ -19,14 +19,15 @@
 #include "profile.skel.h"
 #include "trace_helpers.h"
 
+#define OPT_PERF_MAX_STACK_DEPTH	1 /* --perf-max-stack-depth */
+#define OPT_STACK_STORAGE_SIZE		2 /* --stack-storage-size */
+
 /*
  * -EFAULT in get_stackid normally means the stack-trace is not available,
  * Such as getting kernel stack trace in userspace code
  */
 #define STACK_ID_EFAULT(stack_id)	(stack_id == -EFAULT)
-
 #define STACK_ID_ERR(stack_id)		((stack_id < 0) && !STACK_ID_EFAULT(stack_id))
-
 #define NEED_DELIMITER(delimiter, ustack_id, kstack_id) \
 	(delimiter && ustack_id >= 0 && kstack_id >= 0)
 
@@ -35,6 +36,8 @@ struct key_ext_t {
 	struct key_t k;
 	__u64 v;
 };
+
+typedef const char* (*symname_fn_t)(unsigned long);
 
 static struct env {
 	pid_t pid;
@@ -78,9 +81,6 @@ const char argp_program_doc[] =
 "    profile -U          # only show user space stacks (no kernel)\n"
 "    profile -K          # only show kernel space stacks (no user)\n";
 
-#define OPT_PERF_MAX_STACK_DEPTH	1 /* --perf-max-stack-depth */
-#define OPT_STACK_STORAGE_SIZE		2 /* --stack-storage-size */
-
 static const struct argp_option opts[] = {
 	{ "pid", 'p', "PID", 0, "profile process with this PID only" },
 	{ "tid", 'L', "TID", 0, "profile thread with this TID only" },
@@ -100,8 +100,6 @@ static const struct argp_option opts[] = {
 	{ NULL, 'h', NULL, OPTION_HIDDEN, "Show the full help" },
 	{},
 };
-
-typedef const char* (*symname_fn_t)(unsigned long);
 
 struct ksyms *ksyms;
 struct syms_cache *syms_cache;
@@ -219,10 +217,12 @@ static int open_and_attach_perf_event(int freq, struct bpf_program *prog,
 			/* Ignore CPU that is offline */
 			if (errno == ENODEV)
 				continue;
+
 			fprintf(stderr, "failed to init perf sampling: %s\n",
 				strerror(errno));
 			return -1;
 		}
+
 		links[i] = bpf_program__attach_perf_event(prog, fd);
 		if (!links[i]) {
 			fprintf(stderr, "failed to attach perf event on cpu: "
@@ -240,6 +240,7 @@ static int libbpf_print_fn(enum libbpf_print_level level, const char *format, va
 {
 	if (level == LIBBPF_DEBUG && !env.verbose)
 		return 0;
+
 	return vfprintf(stderr, format, args);
 }
 
@@ -247,10 +248,10 @@ static void sig_handler(int sig)
 {
 }
 
-static int cmp_counts(const void *dx, const void *dy)
+static int cmp_counts(const void *a, const void *b)
 {
-	__u64 x = ((struct key_ext_t *) dx)->v;
-	__u64 y = ((struct key_ext_t *) dy)->v;
+	__u64 x = ((struct key_ext_t *) a)->v;
+	__u64 y = ((struct key_ext_t *) b)->v;
 
 	return x > y ? -1 : !(x == y);
 }
