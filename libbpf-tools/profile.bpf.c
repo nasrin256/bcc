@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: (LGPL-2.1 OR BSD-2-Clause)
-/* Copyright (c) 2022 LG Electronics
+/*
+ * Copyright (c) 2022 LG Electronics
  *
  * Based on profile from BCC by Brendan Gregg and others.
  * 28-Dec-2021   Eunseon Lee   Created this.
