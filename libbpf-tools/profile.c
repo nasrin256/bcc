@@ -264,7 +264,7 @@ static int cmp_counts(const void *a, const void *b)
 	return 0;
 }
 
-static bool read_counts_map(int fd, struct key_ext_t *items, __u32 *count)
+static int read_counts_map(int fd, struct key_ext_t *items, __u32 *count)
 {
 	struct key_t empty = {};
 	struct key_t *lookup_key = &empty;
@@ -275,8 +275,9 @@ static bool read_counts_map(int fd, struct key_ext_t *items, __u32 *count)
 		err = bpf_map_lookup_elem(fd, &items[i].k, &items[i].v);
 		if (err < 0) {
 			fprintf(stderr, "failed to lookup counts: %d\n", err);
-			return false;
+			return -err;
 		}
+
 		if (items[i].v == 0)
 			continue;
 
@@ -285,7 +286,7 @@ static bool read_counts_map(int fd, struct key_ext_t *items, __u32 *count)
 	}
 
 	*count = i;
-	return true;
+	return 0;
 }
 
 static const char *ksymname(unsigned long addr)
@@ -308,14 +309,14 @@ static void print_stacktrace(unsigned long *ip, symname_fn_t symname)
 		printf("    %s\n", symname(ip[i]));
 }
 
-static void print_count(struct key_t *event, __u64 count, int stack_map)
+static int print_count(struct key_t *event, __u64 count, int stack_map)
 {
 	unsigned long *ip;
 
-	ip = calloc(env.perf_max_stack_depth, sizeof(*ip));
+	ip = calloc(env.perf_max_stack_depth, sizeof(unsigned long));
 	if (!ip) {
 		fprintf(stderr, "failed to alloc ip\n");
-		return;
+		return -ENOMEM;
 	}
 
 	/* kernel stack */
@@ -350,20 +351,29 @@ static void print_count(struct key_t *event, __u64 count, int stack_map)
 	printf("        %lld\n\n", count);
 
 	free(ip);
+
+	return 0;
 }
 
-static void print_counts(int counts_map, int stack_map)
+static int print_counts(int counts_map, int stack_map)
 {
-	int i;
+	struct key_ext_t *counts;
 	struct key_t *event;
 	__u64 count;
 	__u32 nr_count = MAX_ENTRIES;
 	bool has_collision = false;
 	unsigned int missing_stacks = 0;
-	struct key_ext_t counts[MAX_ENTRIES];
+	int i, ret;
 
-	if (!read_counts_map(counts_map, counts, &nr_count))
-		return;
+	counts = calloc(MAX_ENTRIES, sizeof(struct key_ext_t));
+	if (!counts) {
+		fprintf(stderr, "Out of memory\n");
+		return -ENOMEM;
+	}
+
+	ret = read_counts_map(counts_map, counts, &nr_count);
+	if (ret)
+		return ret;
 
 	qsort(counts, nr_count, sizeof(struct key_ext_t), cmp_counts);
 
@@ -389,6 +399,8 @@ static void print_counts(int counts_map, int stack_map)
 			missing_stacks, has_collision ?
 			" Consider increasing --stack-storage-size.":"");
 	}
+
+	return 0;
 }
 
 static void print_headers()
