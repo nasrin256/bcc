@@ -26,10 +26,10 @@
 
 /*
  * -EFAULT in get_stackid normally means the stack-trace is not available,
- * Such as getting kernel stack trace in userspace code
+ * such as getting kernel stack trace in user mode
  */
-#define STACK_ID_EFAULT(stack_id)	(stack_id == -EFAULT)
-#define STACK_ID_ERR(stack_id)		((stack_id < 0) && !STACK_ID_EFAULT(stack_id))
+#define STACK_ID_NORMAL_ERR(stack_id)	(stack_id == -EFAULT)
+#define STACK_ID_ERR(stack_id)		((stack_id < 0) && !STACK_ID_NORMAL_ERR(stack_id))
 #define NEED_DELIMITER(delimiter, ustack_id, kstack_id) \
 	(delimiter && ustack_id >= 0 && kstack_id >= 0)
 
@@ -60,7 +60,7 @@ static struct env {
 	.tid = -1,
 	.stack_storage_size = 1024,
 	.perf_max_stack_depth = 127,
-	.duration = 99999999,
+	.duration = INT_MAX,
 	.freq = 1,
 	.sample_freq = 49,
 	.cpu = -1,
@@ -252,10 +252,16 @@ static void sig_handler(int sig)
 
 static int cmp_counts(const void *a, const void *b)
 {
-	__u64 x = ((struct key_ext_t *) a)->v;
-	__u64 y = ((struct key_ext_t *) b)->v;
+	const __u64 x = ((struct key_ext_t *) a)->v;
+	const __u64 y = ((struct key_ext_t *) b)->v;
 
-	return x > y ? -1 : !(x == y);
+	if (x > y)
+		return -1;
+
+	if (x < y)
+		return 1;
+
+	return 0;
 }
 
 static bool read_counts_map(int fd, struct key_ext_t *items, __u32 *count)
@@ -313,7 +319,7 @@ static void print_count(struct key_t *event, __u64 count, int stack_map)
 	}
 
 	/* kernel stack */
-	if (!env.user_stacks_only && !STACK_ID_EFAULT(event->kern_stack_id)) {
+	if (!env.user_stacks_only && !STACK_ID_NORMAL_ERR(event->kern_stack_id)) {
 		if (bpf_map_lookup_elem(stack_map, &event->kern_stack_id, ip) != 0)
 			printf("    [Missed Kernel Stack]\n");
 		else
@@ -321,8 +327,9 @@ static void print_count(struct key_t *event, __u64 count, int stack_map)
 	}
 
 	/* user stack */
-	if (!env.kernel_stacks_only && !STACK_ID_EFAULT(event->user_stack_id)) {
-		if (NEED_DELIMITER(env.delimiter, event->user_stack_id, event->kern_stack_id))
+	if (!env.kernel_stacks_only && !STACK_ID_NORMAL_ERR(event->user_stack_id)) {
+		if (NEED_DELIMITER(env.delimiter, event->user_stack_id,
+				   event->kern_stack_id))
 			printf("    --\n");
 
 		if (bpf_map_lookup_elem(stack_map, &event->user_stack_id, ip) != 0) {
@@ -358,13 +365,13 @@ static void print_counts(int counts_map, int stack_map)
 	if (!read_counts_map(counts_map, counts, &nr_count))
 		return;
 
-	qsort(counts, nr_count, sizeof(counts[0]), cmp_counts);
+	qsort(counts, nr_count, sizeof(struct key_ext_t), cmp_counts);
 
 	for (i = 0; i < nr_count; i++) {
 		event = &counts[i].k;
 		count = counts[i].v;
 
-		/* hash collision (-EEXIST) suggests that the map size may be too small */
+		/* hash collision (-EEXIST) suggests that stack map size may be too small */
 		if (!env.user_stacks_only && STACK_ID_ERR(event->kern_stack_id)) {
 			missing_stacks += 1;
 			has_collision |= (event->kern_stack_id == -EEXIST);
@@ -405,7 +412,7 @@ static void print_headers()
 	if (env.cpu != -1)
 		printf(" on CPU#%d", env.cpu);
 
-	if (env.duration < 99999999)
+	if (env.duration < INT_MAX)
 		printf(" for %d secs.\n", env.duration);
 	else
 		printf("... Hit Ctrl-C to end.\n");
@@ -504,8 +511,11 @@ cleanup:
 		for (i = 0; i < nr_cpus; i++)
 			bpf_link__destroy(links[i]);
 	}
+	if (syms_cache)
+		syms_cache__free(syms_cache);
+	if (ksyms)
+		ksyms__free(ksyms);
 	profile_bpf__destroy(obj);
-	syms_cache__free(syms_cache);
-	ksyms__free(ksyms);
+
 	return err != 0;
 }
