@@ -18,7 +18,6 @@ const volatile pid_t targ_tgid = -1;
 const volatile pid_t targ_pid = -1;
 const volatile long state = -1;
 
-
 struct internal_key {
 	u64 start_ts;
 	struct key_t key;

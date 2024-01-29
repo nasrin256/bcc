@@ -34,7 +34,11 @@ enum log_level {
 	ERROR,
 };
 
-static struct sample_data *g_sample;
+struct unwind_info {
+	void *context;  /* UPT_info */
+	struct sample_data *sample;
+};
+
 static size_t sample_ustack_size;
 struct bpf_object *bpf_obj;
 
@@ -124,10 +128,12 @@ static inline void* uc_addr (unsigned long uc[], int reg)
 
 static int access_reg(unw_addr_space_t as,
 		      unw_regnum_t regnum, unw_word_t *val,
-		      int __write, void *arg) //check. arg = u?
+		      int __write, void *arg)
 {
 	unw_word_t *addr;
-	struct sample_data *sample = g_sample;
+	struct unwind_info *ui = arg;
+
+	printf("%s, %d\n", __FUNCTION__, __LINE__);
 
 	/* Don't support write, I suspect we don't need it. */
 	if (__write) {
@@ -135,7 +141,7 @@ static int access_reg(unw_addr_space_t as,
 		return -EINVAL;
 	}
 
-	if (!(addr = uc_addr ((unsigned long*)&sample->user_regs, regnum))) {
+	if (!(addr = uc_addr ((unsigned long*)&ui->sample->user_regs, regnum))) {
 		p_err("unwind: can't read reg %d\n", regnum);
 		return -EINVAL;
 	}
@@ -149,14 +155,15 @@ static int access_mem(unw_addr_space_t as,
 		      unw_word_t addr, unw_word_t *valp,
 		      int __write, void *arg)
 {
-	struct sample_data *sample = g_sample;
-	struct stack_dump *stack = &sample->user_stack;
+	struct unwind_info *ui = arg;
+	struct stack_dump *stack = &ui->sample->user_stack;
+	pid_t pid = *(pid_t*)(ui->context);
 	unw_word_t *start;
 	unw_word_t end;
 	int offset;
 	int ret;
-	//UPT_info *context = arg;
-	pid_t pid = *(pid_t*)arg;
+
+	printf("%s, %d\n", __FUNCTION__, __LINE__);
 
 	/* Don't support write, probably not needed. */
 	if (__write || !stack) {
@@ -165,7 +172,7 @@ static int access_mem(unw_addr_space_t as,
 		return -EINVAL;
 	}
 
-	if (!(start = uc_addr ((unsigned long*)&sample->user_regs, UNW_REG_SP))) {
+	if (!(start = uc_addr ((unsigned long*)&ui->sample->user_regs, UNW_REG_SP))) {
 		p_err("unwind: can't read reg SP\n");
 		return -EINVAL;
 	}
@@ -203,28 +210,86 @@ static int access_mem(unw_addr_space_t as,
 	return 0;
 }
 
+static int
+find_proc_info(unw_addr_space_t as, unw_word_t ip, unw_proc_info_t *pi,
+	       int need_unwind_info, void *arg)
+{
+	struct unwind_info *ui = arg;
+
+	return _UPT_find_proc_info(as, ip, pi, need_unwind_info, ui->context);
+}
+
+static int get_dyn_info_list_addr(unw_addr_space_t as,
+				  unw_word_t  *dil_addr,
+				  void  *arg)
+{
+	struct unwind_info *ui = arg;
+
+	return _UPT_get_dyn_info_list_addr(as, dil_addr, ui->context);
+}
+
+static void put_unwind_info(unw_addr_space_t  as,
+			    unw_proc_info_t *pi ,
+			    void *arg )
+{
+	struct unwind_info *ui = arg;
+
+	return _UPT_put_unwind_info(as, pi, ui->context);
+}
+
+static int access_fpreg(unw_addr_space_t  as,
+			unw_regnum_t  num,
+			unw_fpreg_t  *val,
+			int  __write,
+			void  *arg)
+{
+	struct unwind_info *ui = arg;
+
+	return _UPT_access_fpreg(as, num, val, __write, ui->context);
+}
+
+static int resume(unw_addr_space_t  as,
+		  unw_cursor_t  *cu,
+		  void  *arg)
+{
+	struct unwind_info *ui = arg;
+
+	return _UPT_resume(as, cu, ui->context);
+}
+
+static int
+get_proc_name(unw_addr_space_t  as,
+	      unw_word_t  addr,
+		char  *bufp, size_t  buf_len,
+		unw_word_t  *offp, void  *arg)
+{
+	struct unwind_info *ui = arg;
+
+	return _UPT_get_proc_name(as, addr, bufp, buf_len, offp, ui->context);
+}
+
 static unw_accessors_t accessors = {
-	.find_proc_info = _UPT_find_proc_info,
-	.put_unwind_info = _UPT_put_unwind_info,
-	.get_dyn_info_list_addr = _UPT_get_dyn_info_list_addr,
+	.find_proc_info = find_proc_info,
+	.put_unwind_info = put_unwind_info,
+	.get_dyn_info_list_addr = get_dyn_info_list_addr,
 	.access_mem = access_mem,
 	.access_reg = access_reg,
-	.access_fpreg = _UPT_access_fpreg,
-	.resume = _UPT_resume,
-	.get_proc_name = _UPT_get_proc_name,
+	.access_fpreg = access_fpreg,
+	.resume = resume,
+	.get_proc_name = get_proc_name,
 };
 
-static int get_entries(struct sample_data *sample, pid_t pid,
+static int get_entries(struct sample_data *sam, pid_t pid,
 		unsigned long *ip, int nr_ip)
 {
 	unw_cursor_t cursor;
-	g_sample = sample;
-	void *context = NULL;
+	struct unwind_info ui = {};
+	ui.sample = sam;
 	int err = 0;
 	int i = 0;
 	unw_addr_space_t as = unw_create_addr_space(&accessors, 0);
 
-	if (!sample || !ip)
+	if (!sam || !ip)
 		return -EINVAL;
 
 	if (ptrace(PTRACE_ATTACH, pid, 0, 0) != 0) {
@@ -232,13 +297,13 @@ static int get_entries(struct sample_data *sample, pid_t pid,
 		return -1;
 	}
 
-	context = _UPT_create(pid);
-	if (!context) {
+	ui.context = _UPT_create(pid);
+	if (!ui.context) {
 		err = -1;
 		goto cleanup;
 	}
 
-	if (unw_init_remote(&cursor, as, context) != 0) {
+	if (unw_init_remote(&cursor, as, &ui) != 0) {
 		p_err("ERROR: cannot initialize cursor for remote unwinding\n");
 		return -1;
 	}
@@ -254,10 +319,12 @@ static int get_entries(struct sample_data *sample, pid_t pid,
 	} while (unw_step(&cursor) > 0 && i < nr_ip);
 
 cleanup:
-	if (context)
-		_UPT_destroy(context);
+	if (ui.context)
+		_UPT_destroy(ui.context);
 
 	(void) ptrace(PTRACE_DETACH, pid, 0, 0);
+
+	unw_destroy_addr_space(as);
 
 	return err;
 }
