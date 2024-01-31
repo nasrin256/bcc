@@ -39,6 +39,7 @@ struct unwind_info {
 	//struct sample_data *sample;
 };
 
+void *context;  /* UPT_info */
 static size_t sample_ustack_size;
 struct bpf_object *bpf_obj;
 
@@ -220,7 +221,7 @@ find_proc_info(unw_addr_space_t as, unw_word_t ip, unw_proc_info_t *pi,
 {
 	struct unwind_info *ui = arg;
 
-	return _UPT_find_proc_info(as, ip, pi, need_unwind_info, arg);
+	return _UPT_find_proc_info(as, ip, pi, need_unwind_info, context);
 }
 
 static int get_dyn_info_list_addr(unw_addr_space_t as,
@@ -274,13 +275,13 @@ get_proc_name(unw_addr_space_t  as,
 
 static unw_accessors_t accessors = {
 	.find_proc_info = find_proc_info,
-	.put_unwind_info = put_unwind_info,
-	.get_dyn_info_list_addr = get_dyn_info_list_addr,
+	.put_unwind_info = put_unwind_info, //empty
+	.get_dyn_info_list_addr = get_dyn_info_list_addr, //empty
 	.access_mem = access_mem,
 	.access_reg = access_reg,
-	.access_fpreg = access_fpreg,
-	.resume = resume,
-	.get_proc_name = get_proc_name,
+	.access_fpreg = access_fpreg, //empty
+	.resume = resume, //empty
+	.get_proc_name = get_proc_name, //empty
 };
 
 static int get_entries(struct sample_data *sam, pid_t pid,
@@ -294,7 +295,7 @@ static int get_entries(struct sample_data *sam, pid_t pid,
 	int i = 0;
 	unw_addr_space_t as = unw_create_addr_space(&accessors, 0);
 	//unw_set_caching_policy(as, UNW_CACHE_GLOBAL);
-	void *context;
+	//void *context;
 
 	if (!sam || !ip)
 		return -EINVAL;
@@ -309,8 +310,10 @@ static int get_entries(struct sample_data *sam, pid_t pid,
 		err = -1;
 		goto cleanup;
 	}
+	ui.context = context;
 
-	if (unw_init_remote(&cursor, as, context) != 0) {
+	//if (unw_init_remote(&cursor, as, context) != 0) {
+	if (unw_init_remote(&cursor, as, &ui) != 0) {
 		p_err("ERROR: cannot initialize cursor for remote unwinding\n");
 		return -1;
 	}
