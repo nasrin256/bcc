@@ -297,8 +297,8 @@ static void dump_sample(int stack_id, struct sample_data *sample)
 	dump_stack(sample->user_stack.data, 20);
 }
 
-int unw_map_lookup_and_unwind_elem(const int ustack_id, pid_t pid,
-				   unsigned long *ip, size_t nr_ip)
+int unwind_map_lookup_elem(const int ustack_id, pid_t pid,
+			   unsigned long *value, size_t value_nr)
 {
 	int samples_map, ustacks_map;
 	struct sample_data *sample = NULL;
@@ -351,7 +351,7 @@ int unw_map_lookup_and_unwind_elem(const int ustack_id, pid_t pid,
 
 	dump_sample(ustack_id, sample);
 
-	err = get_entries(sample, pid, ip, nr_ip);
+	err = get_entries(sample, pid, value, value_nr);
 	if (err)
 		p_err("get_entries failded: %d\n", err);
 
@@ -364,7 +364,7 @@ cleanup:
 	return err;
 }
 
-int unw_map__set(struct bpf_object *obj, size_t ustack_size, size_t max_entries)
+int unwind_map__set(struct bpf_object *obj, size_t ustack_size, size_t max_entries)
 {
 	struct bpf_map *samples_map = bpf_object__find_map_by_name(obj, SAMPLES_MAP_STR);
 	struct bpf_map *ustacks_map = bpf_object__find_map_by_name(obj, USTACKS_MAP_STR);
@@ -372,7 +372,10 @@ int unw_map__set(struct bpf_object *obj, size_t ustack_size, size_t max_entries)
 	if (samples_map < 0 || ustacks_map < 0)
 		return -EINVAL;
 
+	/* set max entries of bpf sample map */
 	bpf_map__set_max_entries(samples_map, max_entries);
+
+	/* set value size and max entries of bpf ustack map */
 	bpf_map__set_value_size(ustacks_map, ustack_size);
 	bpf_map__set_max_entries(ustacks_map, max_entries);
 

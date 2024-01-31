@@ -78,13 +78,13 @@ int BPF_PROG(sched_switch, bool preempt, struct task_struct *prev, struct task_s
 		if (prev->flags & PF_KTHREAD)
 			i_key.key.user_stack_id = -1;
 		else {
-			if (!sample_user_stack) {
+			if (!post_unwind) {
 				i_key.key.user_stack_id =
 					bpf_get_stackid(ctx, &stackmap,
 							BPF_F_USER_STACK);
 			} else {
 				i_key.key.user_stack_id =
-					get_user_stackid();
+					unwind_get_user_stackid();
 			}
 		}
 		i_key.key.kern_stack_id = bpf_get_stackid(ctx, &stackmap, 0);

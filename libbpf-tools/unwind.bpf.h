@@ -17,7 +17,7 @@
 #define DEFAULT_MAX_ENTRIES 1024
 #define DEFAULT_USTACK_SIZE 256
 
-const volatile bool sample_user_stack = false;
+const volatile bool post_unwind = false;
 const volatile unsigned long sample_ustack_size = DEFAULT_USTACK_SIZE;
 const volatile int sample_max_entries = DEFAULT_MAX_ENTRIES;
 
@@ -32,6 +32,8 @@ struct {
 
 /*
  * map to store user stack
+ *
+ * Separate map to store user stacks in variable size
  */
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
@@ -39,18 +41,18 @@ struct {
 } USTACKS_MAP SEC(".maps");
 
 /*
- * get_user_stackid - get user stack and user regs id for @ctx
+ * unwind_get_user_stackid - get user stack and user regs id for @ctx
  *
  * This function returns id of dumped user stack and registers for the context
  */
-static int get_user_stackid()
+static int unwind_get_user_stackid()
 {
 	struct sample_data *sample;
 	struct task_struct *task;
 	struct mm_struct *mm;
 	struct pt_regs *ctx;
-	static const struct sample_data szero;
-	static const char zero[MAX_USTACK_SIZE] = {0, };
+	static const struct sample_data szero = {0, };
+	static const char uzero[MAX_USTACK_SIZE] = {0, };
 	__u64* ustack;
 	static __u32 id = 0;
 	u64 sp;
@@ -73,7 +75,7 @@ static int get_user_stackid()
 	if (!sample)
 		return -1;
 
-	ustack = bpf_map_lookup_or_try_init(&ustacks, &id, &zero);
+	ustack = bpf_map_lookup_or_try_init(&ustacks, &id, &uzero);
 	if (!ustack)
 		return -1;
 

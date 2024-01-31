@@ -31,7 +31,7 @@ static struct env {
 	int duration;
 	bool verbose;
 #ifdef USE_LIBUNWIND
-	bool unwind;
+	bool post_unwind;
 	int sample_ustack_size;
 #endif
 } env = {
@@ -174,7 +174,7 @@ static error_t parse_arg(int key, char *arg, struct argp_state *state)
 		break;
 #ifdef USE_LIBUNWIND
 	case 'P':
-		env.unwind = true;
+		env.post_unwind = true;
 		break;
 	case OPT_SAMPLE_STACK_SIZE:
 		errno = 0;
@@ -219,6 +219,16 @@ static int libbpf_print_fn(enum libbpf_print_level level, const char *format, va
 
 static void sig_handler(int sig)
 {
+}
+
+static int read_stacktrace(int sfd, int *stack_id, pid_t pid, unsigned long *ip, size_t ip_nr)
+{
+#ifdef USE_LIBUNWIND
+		if (env.post_unwind)
+			return unwind_map_lookup_elem(*stack_id, pid, ip, ip_nr);
+#endif
+
+		return bpf_map_lookup_elem(sfd, stack_id, ip);
 }
 
 static void print_map(struct ksyms *ksyms, struct syms_cache *syms_cache,
@@ -276,22 +286,13 @@ print_ustack:
 		if (next_key.user_stack_id == -1)
 			goto skip_ustack;
 
-#ifdef USE_LIBUNWIND
-		if (env.unwind) {
-			if (unw_map_lookup_and_unwind_elem(next_key.user_stack_id, next_key.pid,
-							   ip, env.perf_max_stack_depth) != 0) {
-				fprintf(stderr, "    [Missed User Stack]\n");
-				goto skip_ustack;
-			}
-			goto sym_resolve;
-		}
-#endif
-		if (bpf_map_lookup_elem(sfd, &next_key.user_stack_id, ip) != 0) {
+
+		if (read_stacktrace(sfd, &next_key.user_stack_id, next_key.pid, ip,
+				    env.perf_max_stack_depth) != 0) {
 			fprintf(stderr, "    [Missed User Stack]\n");
 			goto skip_ustack;
 		}
 
-sym_resolve:
 		syms = syms_cache__get_syms(syms_cache, next_key.tgid);
 		if (!syms) {
 			if (!env.verbose) {
@@ -377,9 +378,9 @@ int main(int argc, char **argv)
 	bpf_map__set_max_entries(obj->maps.stackmap, env.stack_storage_size);
 
 #ifdef USE_LIBUNWIND
-	if (env.unwind) {
-		if (UNW_SET_ENV(obj, env.sample_ustack_size, 1024) < 0) {
-			fprintf(stderr, "failed to set env to unwind_helpers\n");
+	if (env.post_unwind) {
+		if (UNWIND_INIT(obj, env.sample_ustack_size, 1024) < 0) {
+			fprintf(stderr, "failed to int unwind_helpers\n");
 			goto cleanup;
 		}
 	}
