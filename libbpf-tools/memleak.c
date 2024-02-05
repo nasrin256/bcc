@@ -50,6 +50,7 @@ static struct env {
 	bool kernel_trace;
 	bool verbose;
 	char command[32];
+	char* symbols_prefix;
 } env = {
 	.interval = 5, // posarg 1
 	.nr_intervals = -1, // posarg 2
@@ -86,10 +87,14 @@ struct allocation {
 	struct allocation_node* allocations;
 };
 
+#define OPT_SYMBOLS_PREFIX		1 /* --symbols-prefix */
+
 #define __ATTACH_UPROBE(skel, sym_name, prog_name, is_retprobe) \
 	do { \
+		char sym_buf[1024] = {0, }; \
+		snprintf(sym_buf, 1024, "%s%s", env.symbols_prefix ? env.symbols_prefix : "", #sym_name);  \
 		LIBBPF_OPTS(bpf_uprobe_opts, uprobe_opts, \
-				.func_name = #sym_name, \
+				.func_name = sym_buf, \
 				.retprobe = is_retprobe); \
 		skel->links.prog_name = bpf_program__attach_uprobe_opts( \
 				skel->progs.prog_name, \
@@ -198,6 +203,8 @@ static const struct argp_option argp_options[] = {
 	{"max-size", 'Z', "MAX_SIZE", 0, "capture only allocations smaller than this size"},
 	{"obj", 'O', "OBJECT", 0, "attach to allocator functions in the specified object"},
 	{"percpu", 'P', NULL, 0, "trace percpu allocations"},
+	{"symbols-prefix", OPT_SYMBOLS_PREFIX, "SYMBOLS_PREFIX", 0,
+	 "memory alloctor symbols prefix"},
 	{},
 };
 
@@ -540,6 +547,11 @@ error_t argp_parse_arg(int key, char *arg, struct argp_state *state)
 		break;
 	case 'P':
 		env.percpu = true;
+		break;
+	case OPT_SYMBOLS_PREFIX:
+		env.symbols_prefix = strdup(arg);
+		if (env.symbols_prefix == NULL)
+			return ARGP_ERR_UNKNOWN;
 		break;
 	case ARGP_KEY_ARG:
 		pos_args++;
@@ -1037,8 +1049,8 @@ int attach_uprobes(struct memleak_bpf *skel)
 	ATTACH_UPROBE_CHECKED(skel, realloc, realloc_enter);
 	ATTACH_URETPROBE_CHECKED(skel, realloc, realloc_exit);
 
-	ATTACH_UPROBE_CHECKED(skel, mmap, mmap_enter);
-	ATTACH_URETPROBE_CHECKED(skel, mmap, mmap_exit);
+	ATTACH_UPROBE(skel, mmap, mmap_enter);   /* failed on jemalloc */
+	ATTACH_URETPROBE(skel, mmap, mmap_exit); /* failed on jemalloc */
 
 	ATTACH_UPROBE_CHECKED(skel, posix_memalign, posix_memalign_enter);
 	ATTACH_URETPROBE_CHECKED(skel, posix_memalign, posix_memalign_exit);
@@ -1047,7 +1059,7 @@ int attach_uprobes(struct memleak_bpf *skel)
 	ATTACH_URETPROBE_CHECKED(skel, memalign, memalign_exit);
 
 	ATTACH_UPROBE_CHECKED(skel, free, free_enter);
-	ATTACH_UPROBE_CHECKED(skel, munmap, munmap_enter);
+	ATTACH_UPROBE(skel, munmap, munmap_enter); /* failed on jemalloc */
 
 	// the following probes are intentinally allowed to fail attachment
 
