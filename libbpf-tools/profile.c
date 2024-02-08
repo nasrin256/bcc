@@ -270,43 +270,48 @@ static int cmp_counts(const void *a, const void *b)
 
 static bool batch_map_ops = true; /* hope for the best */
 
-static bool read_batch_counts_map(int fd, struct key_ext_t *items, __u32 *count)
+static bool read_batch_counts_map(int fd, struct key_ext_t *vals, __u32 *nr_val)
 {
+	struct key_t keys[*nr_val];
+	__u32 orig_vals[*nr_val];
 	void *in = NULL, *out;
 	__u32 i, n, n_read = 0;
 	int err = 0;
-	__u32 vals[*count];
-	struct key_t keys[*count];
 
-	while (n_read < *count && !err) {
-		n = *count - n_read;
+	while (n_read < *nr_val && !err) {
+		n = *nr_val - n_read;
 		err = bpf_map_lookup_batch(fd, &in, &out, keys + n_read,
-					   vals + n_read, &n, NULL);
+					   orig_vals + n_read, &n, NULL);
 		if (err && errno != ENOENT) {
 			/* we want to propagate EINVAL upper, so that
 			 * the batch_map_ops flag is set to false */
 			if (errno != EINVAL)
 				fprintf(stderr, "bpf_map_lookup_batch: %s\n",
-				     strerror(-err));
+					strerror(-err));
+
 			return false;
 		}
+
 		n_read += n;
 		in = out;
 	}
 
 	for (i = 0; i < n_read; i++) {
-		items[i].k.pid = keys[i].pid;
-		items[i].k.user_stack_id = keys[i].user_stack_id;
-		items[i].k.kern_stack_id = keys[i].kern_stack_id;
-		strncpy(items[i].k.name, keys[i].name, TASK_COMM_LEN);
-		items[i].v = vals[i];
+		if (orig_vals[i] == 0)
+			continue;
+
+		vals[i].k.pid = keys[i].pid;
+		vals[i].k.user_stack_id = keys[i].user_stack_id;
+		vals[i].k.kern_stack_id = keys[i].kern_stack_id;
+		strncpy(vals[i].k.name, keys[i].name, TASK_COMM_LEN);
+		vals[i].v = orig_vals[i];
 	}
 
-	*count = n_read;
+	*nr_val = i;
 	return true;
 }
 
-static int read_counts_map(int fd, struct key_ext_t *items, __u32 *count)
+static int read_counts_map(int fd, struct key_ext_t *vals, __u32 *nr_val)
 {
 	struct key_t empty = {};
 	struct key_t *lookup_key = &empty;
@@ -314,35 +319,35 @@ static int read_counts_map(int fd, struct key_ext_t *items, __u32 *count)
 	int err;
 
 	if (batch_map_ops) {
-		bool ok = read_batch_counts_map(fd, items, count);
+		bool ok = read_batch_counts_map(fd, vals, nr_val);
 		if (!ok && errno == EINVAL) {
 			/* fall back to a racy variant */
 			batch_map_ops = false;
 		} else {
-			return ok;
+			return 0;
 		}
 	}
 
 #if 0
-	if (!items || !count || !*count)
+	if (!vals || !nr_val || !*nr_val)
 		return true;
 #endif
 
-	while (bpf_map_get_next_key(fd, lookup_key, &items[i].k) == 0) {
-		err = bpf_map_lookup_elem(fd, &items[i].k, &items[i].v);
+	while (bpf_map_get_next_key(fd, lookup_key, &vals[i].k) == 0) {
+		err = bpf_map_lookup_elem(fd, &vals[i].k, &vals[i].v);
 		if (err < 0) {
 			fprintf(stderr, "failed to lookup counts: %d\n", err);
 			return -err;
 		}
 
-		if (items[i].v == 0)
+		if (vals[i].v == 0)
 			continue;
 
-		lookup_key = &items[i].k;
+		lookup_key = &vals[i].k;
 		i++;
 	}
 
-	*count = i;
+	*nr_val = i;
 	return 0;
 }
 
