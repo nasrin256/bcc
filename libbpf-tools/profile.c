@@ -268,12 +268,65 @@ static int cmp_counts(const void *a, const void *b)
 	return y - x;
 }
 
+static bool batch_map_ops = true; /* hope for the best */
+
+static bool read_batch_counts_map(int fd, struct key_ext_t *items, __u32 *count)
+{
+	void *in = NULL, *out;
+	__u32 i, n, n_read = 0;
+	int err = 0;
+	__u32 vals[*count];
+	struct key_t keys[*count];
+
+	while (n_read < *count && !err) {
+		n = *count - n_read;
+		err = bpf_map_lookup_batch(fd, &in, &out, keys + n_read,
+					   vals + n_read, &n, NULL);
+		if (err && errno != ENOENT) {
+			/* we want to propagate EINVAL upper, so that
+			 * the batch_map_ops flag is set to false */
+			if (errno != EINVAL)
+				fprintf(stderr, "bpf_map_lookup_batch: %s\n",
+				     strerror(-err));
+			return false;
+		}
+		n_read += n;
+		in = out;
+	}
+
+	for (i = 0; i < n_read; i++) {
+		items[i].k.pid = keys[i].pid;
+		items[i].k.user_stack_id = keys[i].user_stack_id;
+		items[i].k.kern_stack_id = keys[i].kern_stack_id;
+		strncpy(items[i].k.name, keys[i].name, TASK_COMM_LEN);
+		items[i].v = vals[i];
+	}
+
+	*count = n_read;
+	return true;
+}
+
 static int read_counts_map(int fd, struct key_ext_t *items, __u32 *count)
 {
 	struct key_t empty = {};
 	struct key_t *lookup_key = &empty;
 	int i = 0;
 	int err;
+
+	if (batch_map_ops) {
+		bool ok = read_batch_counts_map(fd, items, count);
+		if (!ok && errno == EINVAL) {
+			/* fall back to a racy variant */
+			batch_map_ops = false;
+		} else {
+			return ok;
+		}
+	}
+
+#if 0
+	if (!items || !count || !*count)
+		return true;
+#endif
 
 	while (bpf_map_get_next_key(fd, lookup_key, &items[i].k) == 0) {
 		err = bpf_map_lookup_elem(fd, &items[i].k, &items[i].v);
