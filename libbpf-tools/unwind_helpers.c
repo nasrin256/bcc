@@ -20,6 +20,8 @@
 #include <errno.h>
 #include <dirent.h>
 #include "unwind_helpers.h"
+#include <unistd.h>
+#include <fcntl.h>
 
 /* for internal logs */
 #define p_debug(fmt, ...) __p(DEBUG, "Debug", fmt, ##__VA_ARGS__)
@@ -37,6 +39,7 @@ enum log_level {
 static struct sample_data *g_sample;
 static size_t sample_ustack_size;
 struct bpf_object *bpf_obj;
+int mem_fd;
 
 /*
  * default log level can be changed as needed.
@@ -59,7 +62,22 @@ void __p(enum log_level level, char *level_str, char *fmt, ...)
 /*
  * libunwind address space for post unwinding
  */
-static int ptrace_access_mem (unw_word_t addr, unw_word_t *val, int write, pid_t pid)
+#ifndef USE_PTRACE
+static int access_dso_mem (unw_word_t addr, unw_word_t *val, pid_t pid)
+{
+	ssize_t len;
+
+	lseek(mem_fd, addr, SEEK_SET);
+
+	len = read(mem_fd, val, sizeof(*val));
+	if (len == -1)
+		return -UNW_EINVAL;
+
+	p_debug("mem[%lx] -> %lx\n", (long) addr, (long) *val);
+	return 0;
+}
+#else
+static int access_dso_mem (unw_word_t addr, unw_word_t *val, pid_t pid)
 {
 	int i, end;
 	unw_word_t tmp_val;
@@ -78,40 +96,26 @@ static int ptrace_access_mem (unw_word_t addr, unw_word_t *val, int write, pid_t
 	for (i = 0; i < end; i++)
 	{
 		unw_word_t tmp_addr = i == 0 ? addr : addr + 4;
-
 		errno = 0;
-		if (write) {
-#if __BYTE_ORDER == __LITTLE_ENDIAN
-			tmp_val = i == 0 ? *val : *val >> 32;
-#else
-			tmp_val = i == 0 && end == 2 ? *val >> 32 : *val;
-#endif
 
-			p_debug("mem[%lx] <- %lx\n", (long) tmp_addr, (long) tmp_val);
-			ptrace (PTRACE_POKEDATA, pid, tmp_addr, tmp_val);
-			if (errno) {
-				return -UNW_EINVAL;
-			}
-		}
-		else {
-			tmp_val = (unsigned long) ptrace (PTRACE_PEEKDATA, pid, tmp_addr, 0);
-			if (i == 0)
-				*val = 0;
+		tmp_val = (unsigned long) ptrace (PTRACE_PEEKDATA, pid, tmp_addr, 0);
+		if (i == 0)
+			*val = 0;
 
 #if __BYTE_ORDER == __LITTLE_ENDIAN
-			*val |= tmp_val << (i * 32);
+		*val |= tmp_val << (i * 32);
 #else
-			*val |= i == 0 && end == 2 ? tmp_val << 32 : tmp_val;
+		*val |= i == 0 && end == 2 ? tmp_val << 32 : tmp_val;
 #endif
 
-			if (errno) {
-				return -UNW_EINVAL;
-			}
-			p_debug("mem[%lx] -> %lx\n", (long) tmp_addr, (long) tmp_val);
-		}
+		if (errno)
+			return -UNW_EINVAL;
+
+		p_debug("mem[%lx] -> %lx\n", (long) tmp_addr, (long) tmp_val);
 	}
 	return 0;
 }
+#endif
 
 #if defined(__TARGET_ARCH_x86) || defined(__TARGET_ARCH_arm64)
 static inline void* uc_addr (unsigned long uc[], int reg)
@@ -179,8 +183,7 @@ static int access_mem(unw_addr_space_t as,
 	}
 
 	if (addr < *start || addr + sizeof(unw_word_t) >= end) {
-		//ret = ptrace_access_mem(addr, valp, __write, sample->pid);
-		ret = ptrace_access_mem(addr, valp, __write, pid);
+		ret = access_dso_mem(addr, valp, pid);
 		if (ret) {
 			p_warn("unwind: access_mem %p not inside range"
 						 " 0x%" PRIx64 "-0x%" PRIx64 "\n",
@@ -214,6 +217,7 @@ static unw_accessors_t accessors = {
 	.get_proc_name = _UPT_get_proc_name,
 };
 
+
 static int get_entries(struct sample_data *sample, pid_t pid,
 		unsigned long *ip, int nr_ip)
 {
@@ -227,10 +231,12 @@ static int get_entries(struct sample_data *sample, pid_t pid,
 	if (!sample || !ip)
 		return -EINVAL;
 
+#ifdef USE_PTRACE
 	if (ptrace(PTRACE_ATTACH, pid, 0, 0) != 0) {
 		p_err("ERROR: cannot attach to %d\n", pid);
 		return -1;
 	}
+#endif
 
 	context = _UPT_create(pid);
 	if (!context) {
@@ -257,7 +263,9 @@ cleanup:
 	if (context)
 		_UPT_destroy(context);
 
+#ifdef USE_PTRACE
 	(void) ptrace(PTRACE_DETACH, pid, 0, 0);
+#endif
 
 	return err;
 }
@@ -295,7 +303,17 @@ int unw_map_lookup_and_unwind_elem(const int ustack_id, pid_t pid,
 	int samples_map, ustacks_map;
 	struct sample_data *sample = NULL;
 	char *sample_ustack = NULL;
+	char mem_path[256];
 	int err;
+
+#ifndef USE_PTRACE
+	snprintf(mem_path, sizeof(mem_path), "/proc/%d/mem", pid);
+	mem_fd = open(mem_path, O_RDONLY);
+	if (mem_fd == -1) {
+		p_err("failed to open %s: %s", mem_path, strerror(errno));
+		return -EINVAL;
+	}
+#endif
 
 	sample = (struct sample_data*)malloc(sizeof(struct sample_data));
 	if (!sample)
