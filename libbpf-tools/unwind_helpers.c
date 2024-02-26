@@ -1,12 +1,11 @@
-/* SPDX-License-Identifier: (LGPL-2.1 OR BSD-2-Clause) */
-/* Copyright (c) 2023 Eunseon Lee
- *
- * 04-Feb-2023   Eunseon Lee   Created this.
- *
+// SPDX-License-Identifier: (LGPL-2.1 OR BSD-2-Clause)
+/*
  * Post mortem Dwarf CFI based unwinding on top of regs and stack dumps.
+ * Copyright 2023 LG Electronics Inc.
  *
  * Lots of this code have been borrowed or heavily inspired from parts of
  * the libunwind and perf codes.
+ * 04-Feb-2023   Eunseon Lee   Created this.
  */
 
 #include <stdio.h>
@@ -290,15 +289,15 @@ static void dump_regs(regs_dump_t *user_regs)
 		p_debug("regs[%d]: 0x%llx\n", i, user_regs[i]);
 }
 
-static void dump_sample(int stack_id, struct sample_data *sample)
+static void dump_sample(const int stack_id, struct sample_data *sample)
 {
 	p_debug("post unwind for stack %d\n", stack_id);
 	dump_regs(&sample->user_regs);
 	dump_stack(sample->user_stack.data, 20);
 }
 
-int unwind_map_lookup_elem(const int ustack_id, pid_t pid,
-			   unsigned long *value, size_t value_nr)
+int unwind_map_lookup_elem(const int *ustack_id, pid_t pid,
+			   unsigned long *value, size_t count)
 {
 	int samples_map, ustacks_map;
 	struct sample_data *sample = NULL;
@@ -325,33 +324,33 @@ int unwind_map_lookup_elem(const int ustack_id, pid_t pid,
 		goto cleanup;
 	}
 
-	samples_map = bpf_map__fd(bpf_object__find_map_by_name(bpf_obj, SAMPLES_MAP_STR));
+	samples_map = bpf_map__fd(bpf_object__find_map_by_name(bpf_obj, NAME(UNWIND_SAMPLES_MAP)));
 	if (samples_map < 0) {
 		err = samples_map;
 		goto cleanup;
 	}
-	ustacks_map = bpf_map__fd(bpf_object__find_map_by_name(bpf_obj, USTACKS_MAP_STR));
+	ustacks_map = bpf_map__fd(bpf_object__find_map_by_name(bpf_obj, NAME(UNWIND_STACKS_MAP)));
 	if (ustacks_map < 0) {
 		err = ustacks_map;
 		goto cleanup;
 	}
 
-	err = bpf_map_lookup_elem(samples_map, &ustack_id, sample);
+	err = bpf_map_lookup_elem(samples_map, ustack_id, sample);
 	if (err < 0) {
-		fprintf(stderr, "failed to lookup samples for stack %d: %d\n", ustack_id, err);
+		fprintf(stderr, "failed to lookup samples for stack %d: %d\n", *ustack_id, err);
 		goto cleanup;
 	}
 
-	err = bpf_map_lookup_elem(ustacks_map, &ustack_id, sample_ustack);
+	err = bpf_map_lookup_elem(ustacks_map, ustack_id, sample_ustack);
 	if (err < 0) {
-		fprintf(stderr, "failed to lookup ustacks for stack %d: %d\n", ustack_id, err);
+		fprintf(stderr, "failed to lookup ustacks for stack %d: %d\n", *ustack_id, err);
 		goto cleanup;
 	}
 	sample->user_stack.data = sample_ustack;
 
-	dump_sample(ustack_id, sample);
+	dump_sample(*ustack_id, sample);
 
-	err = get_entries(sample, pid, value, value_nr);
+	err = get_entries(sample, pid, value, count);
 	if (err)
 		p_err("get_entries failded: %d\n", err);
 
@@ -366,8 +365,8 @@ cleanup:
 
 int unwind_map__set(struct bpf_object *obj, size_t ustack_size, size_t max_entries)
 {
-	struct bpf_map *samples_map = bpf_object__find_map_by_name(obj, SAMPLES_MAP_STR);
-	struct bpf_map *ustacks_map = bpf_object__find_map_by_name(obj, USTACKS_MAP_STR);
+	struct bpf_map *samples_map = bpf_object__find_map_by_name(obj, NAME(UNWIND_SAMPLES_MAP));
+	struct bpf_map *ustacks_map = bpf_object__find_map_by_name(obj, NAME(UNWIND_STACKS_MAP));
 
 	if (samples_map < 0 || ustacks_map < 0)
 		return -EINVAL;

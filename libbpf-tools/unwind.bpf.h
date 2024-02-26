@@ -1,4 +1,5 @@
-/* SPDX-License-Identifier: (LGPL-2.1 OR BSD-2-Clause) */
+// SPDX-License-Identifier: (LGPL-2.1 OR BSD-2-Clause)
+// Copyright 2023 LG Electronics Inc.
 #ifndef __UNWIND_BPF_H
 #define __UNWIND_BPF_H
 
@@ -28,7 +29,7 @@ struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
 	__type(key, u32);
 	__type(value, struct sample_data);
-} SAMPLES_MAP SEC(".maps");
+} UNWIND_SAMPLES_MAP SEC(".maps");
 
 /*
  * map to store user stack
@@ -38,7 +39,7 @@ struct {
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
 	__type(key, u32);
-} USTACKS_MAP SEC(".maps");
+} UNWIND_STACKS_MAP SEC(".maps");
 
 /*
  * unwind_get_user_stackid - get user stack and user regs id for @ctx
@@ -52,7 +53,7 @@ static int unwind_get_user_stackid()
 	struct mm_struct *mm;
 	struct pt_regs *ctx;
 	static const struct sample_data szero = {0, };
-	static const char uzero[MAX_USTACK_SIZE] = {0, };
+	static const char uzero[UNWIND_STACK_MAX_SZ] = {0, };
 	__u64* ustack;
 	static __u32 id = 0;
 	u64 sp;
@@ -71,11 +72,11 @@ static int unwind_get_user_stackid()
 
 	__sync_fetch_and_add(&id, 1);
 
-	sample = bpf_map_lookup_or_try_init(&samples, &id, &szero);
+	sample = bpf_map_lookup_or_try_init(&UNWIND_SAMPLES_MAP, &id, &szero);
 	if (!sample)
 		return -1;
 
-	ustack = bpf_map_lookup_or_try_init(&ustacks, &id, &uzero);
+	ustack = bpf_map_lookup_or_try_init(&UNWIND_STACKS_MAP, &id, &uzero);
 	if (!ustack)
 		return -1;
 

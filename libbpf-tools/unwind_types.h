@@ -1,12 +1,14 @@
-/* SPDX-License-Identifier: (LGPL-2.1 OR BSD-2-Clause) */
+// SPDX-License-Identifier: (LGPL-2.1 OR BSD-2-Clause)
+// Copyright 2023 LG Electronics Inc.
 #ifndef __UNWIND_TYPES_H
 #define __UNWIND_TYPES_H
 
-#define MAX_USTACK_SIZE			4096
-#define SAMPLES_MAP			samples
-#define SAMPLES_MAP_STR			"samples"
-#define USTACKS_MAP			ustacks
-#define USTACKS_MAP_STR			"ustacks"
+#define STRINGIFY(x)		#x
+#define NAME(x)			STRINGIFY(x)
+
+#define UNWIND_STACK_MAX_SZ		4096
+#define UNWIND_SAMPLES_MAP		unwind_samples
+#define UNWIND_STACKS_MAP		unwind_stacks
 
 #if defined(__TARGET_ARCH_arm64)
 struct user_regs {

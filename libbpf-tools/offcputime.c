@@ -183,9 +183,9 @@ static error_t parse_arg(int key, char *arg, struct argp_state *state)
 			fprintf(stderr, "invalid stack size: %s\n", arg);
 			argp_usage(state);
 		}
-		if (env.sample_ustack_size > MAX_USTACK_SIZE) {
+		if (env.sample_ustack_size > UNWIND_STACK_MAX_SZ) {
 			fprintf(stderr, "the stack size is too big, please "
-				"increase MAX_USTACK_SIZE's value and recompile");
+				"increase UNWIND_STACK_MAX_SZ's value and recompile");
 			argp_usage(state);
 		}
 
@@ -221,14 +221,13 @@ static void sig_handler(int sig)
 {
 }
 
-static int read_stacktrace(int sfd, int *stack_id, pid_t pid, unsigned long *ip, size_t ip_nr)
+static int stackmap_lookup_elem(int sfd, int *stack_id, pid_t pid, unsigned long *ip, size_t count)
 {
 #ifdef USE_LIBUNWIND
-		if (env.post_unwind)
-			return unwind_map_lookup_elem(*stack_id, pid, ip, ip_nr);
+	if (env.post_unwind)
+		return unwind_map_lookup_elem(stack_id, pid, ip, count);
 #endif
-
-		return bpf_map_lookup_elem(sfd, stack_id, ip);
+	return bpf_map_lookup_elem(sfd, stack_id, ip);
 }
 
 static void print_map(struct ksyms *ksyms, struct syms_cache *syms_cache,
@@ -287,7 +286,7 @@ print_ustack:
 			goto skip_ustack;
 
 
-		if (read_stacktrace(sfd, &next_key.user_stack_id, next_key.pid, ip,
+		if (stackmap_lookup_elem(sfd, &next_key.user_stack_id, next_key.pid, ip,
 				    env.perf_max_stack_depth) != 0) {
 			fprintf(stderr, "    [Missed User Stack]\n");
 			goto skip_ustack;
@@ -379,7 +378,7 @@ int main(int argc, char **argv)
 
 #ifdef USE_LIBUNWIND
 	if (env.post_unwind) {
-		if (UNWIND_INIT(obj, env.sample_ustack_size, 1024) < 0) {
+		if (UNWIND_INIT(obj, env.sample_ustack_size, MAX_ENTRIES) < 0) {
 			fprintf(stderr, "failed to int unwind_helpers\n");
 			goto cleanup;
 		}

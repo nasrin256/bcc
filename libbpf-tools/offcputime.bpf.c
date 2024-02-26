@@ -8,7 +8,6 @@
 #include "unwind.bpf.h"
 
 #define PF_KTHREAD		0x00200000	/* I am a kernel thread */
-#define MAX_ENTRIES		10240
 
 const volatile bool kernel_threads_only = false;
 const volatile bool user_threads_only = false;

@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: (LGPL-2.1 OR BSD-2-Clause) */
+/* Copyright 2023 LG Electronics Inc. */
 #ifndef __UNWIND_HELPERS_H
 #define __UNWIND_HELPERS_H
 
@@ -34,12 +35,12 @@ int unwind_map__set(struct bpf_object *obj, size_t sample_ustack_size, size_t ma
  * @ustack_id: user stack id to lookup and unwind
  * @pid: process id of @key
  * @value: pointer to memory in which unwounded value will be stored
- * @value_nr: number of value data memory
+ * @count: number of value data memory
  *
  * This function returns id of dumped user stack and registers for current context
  * 	Perform a lookup in *map* for an entry associated to *key*.
  */
-int unwind_map_lookup_elem(const int ustack_id, pid_t pid,
-			   unsigned long *value, size_t value_nr);
+int unwind_map_lookup_elem(const int *ustack_id, pid_t pid,
+			   unsigned long *value, size_t count);
 
 #endif /* __UNWIND_HELPERS_H */
