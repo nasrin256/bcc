@@ -6,24 +6,25 @@
 #include "unwind_types.h"
 #include "maps.bpf.h"
 
-/*
- * Post mortem Dwarf CFI based unwinding on top of regs and stack dumps.
- *
- * Lots of this code have been borrowed or heavily inspired from parts of
- * the libunwind and perf codes.
- */
-
 #define MIN(x, y) (((x) < (y)) ? (x) : (y))
-
 #define DEFAULT_MAX_ENTRIES 1024
 #define DEFAULT_USTACK_SIZE 256
 
 const volatile bool post_unwind = false;
-const volatile unsigned long sample_ustack_size = DEFAULT_USTACK_SIZE;
 const volatile int sample_max_entries = DEFAULT_MAX_ENTRIES;
+const volatile unsigned long sample_ustack_size = DEFAULT_USTACK_SIZE;
 
 /*
- * map to store sample data
+ * Separated stack map to allow value sizes to change at runtime
+ */
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__type(key, u32);
+} UNWIND_STACKS_MAP SEC(".maps");
+
+/*
+ * Map to store sample data
+ * The length of the dumped stack and the regs dump are saved.
  */
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
@@ -32,19 +33,7 @@ struct {
 } UNWIND_SAMPLES_MAP SEC(".maps");
 
 /*
- * map to store user stack
- *
- * Separate map to store user stacks in variable size
- */
-struct {
-	__uint(type, BPF_MAP_TYPE_HASH);
-	__type(key, u32);
-} UNWIND_STACKS_MAP SEC(".maps");
-
-/*
- * unwind_get_user_stackid - get user stack and user regs id for @ctx
- *
- * This function returns id of dumped user stack and registers for the context
+ * Returns the ID of the user sample dumped for the current context.
  */
 static int unwind_get_user_stackid()
 {

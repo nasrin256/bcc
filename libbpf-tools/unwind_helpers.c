@@ -7,7 +7,6 @@
  * the libunwind and perf codes.
  * 04-Feb-2023   Eunseon Lee   Created this.
  */
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdarg.h>
@@ -35,15 +34,11 @@ enum log_level {
 	ERROR,
 };
 
+static enum log_level log_level = WARN;
 static struct sample_data *g_sample;
 static size_t sample_ustack_size;
 struct bpf_object *bpf_obj;
 int mem_fd;
-
-/*
- * default log level can be changed as needed.
- */
-static enum log_level log_level = WARN;
 
 void __p(enum log_level level, char *level_str, char *fmt, ...)
 {
@@ -158,7 +153,6 @@ static int access_mem(unw_addr_space_t as,
 	unw_word_t end;
 	int offset;
 	int ret;
-	//UPT_info *context = arg;
 	pid_t pid = *(pid_t*)arg;
 
 	/* Don't support write, probably not needed. */

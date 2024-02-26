@@ -1,5 +1,5 @@
-/* SPDX-License-Identifier: (LGPL-2.1 OR BSD-2-Clause) */
-/* Copyright 2023 LG Electronics Inc. */
+// SPDX-License-Identifier: (LGPL-2.1 OR BSD-2-Clause)
+// Copyright 2023 LG Electronics Inc.
 #ifndef __UNWIND_HELPERS_H
 #define __UNWIND_HELPERS_H
 
@@ -7,6 +7,21 @@
 #include <bpf/libbpf.h>
 #include <libunwind-ptrace.h>
 #include "unwind_types.h"
+
+/*
+ * How to use
+ *
+ * In case of POEM tool,
+ *
+ * for POEM.bpf.c
+ * 1. include unwind.bpf.h
+ * 2. can use unwind_get_user_stackid to get stackid
+ *
+ * for POEM.c
+ * 1. include unwind_helpers.h
+ * 2. call UNWIND_INIT before calling *_bpf__load to init resource sizes in unwind_helper.
+ * 3. call unwind_map_lookup_elem to get ips for stack id.
+ */
 
 /*
  * UNWIND_INIT(obj, user_stack_size, unwind_max_entries)
