@@ -4,6 +4,22 @@
 
 #define ALLOCS_MAX_ENTRIES 1000000
 #define COMBINED_ALLOCS_MAX_ENTRIES 10240
+#define MAX_CPU_NR	128
+#define RAW_ALLOCS_MAX_ENTRIES 100
+
+struct raw_alloc_info {
+	__u64 timestamp_ns;
+	__u64 addr;
+	__u64 size;
+	__u32 stack_id;
+	__u64 pid;
+};
+
+struct raw_dealloc_info {
+	__u64 timestamp_ns;
+	__u64 addr;
+	__u64 pid;
+};
 
 struct alloc_info {
 	__u64 size;

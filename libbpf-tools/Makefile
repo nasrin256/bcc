@@ -24,7 +24,7 @@ CARGO ?= $(shell which cargo)
 ifeq ($(strip $(CARGO)),)
 USE_BLAZESYM ?= 0
 else
-USE_BLAZESYM ?= 1
+USE_BLAZESYM ?= 0
 endif
 endif
 
