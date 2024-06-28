@@ -175,7 +175,8 @@ static int gen_alloc_exit2(void *ctx, u64 address)
 		rinfo.timestamp_ns = bpf_ktime_get_ns();
 		rinfo.addr = address;
 		rinfo.stack_id = bpf_get_stackid(ctx, &stack_traces, stack_flags);
-		rinfo.pid = bpf_get_current_pid_tgid();
+		//rinfo.pid = bpf_get_current_pid_tgid();
+		rinfo.pid = bpf_get_current_pid_tgid() >> 32;
 		bpf_map_update_elem(&raw_allocs, &key, &rinfo, BPF_ANY);
 	}
 

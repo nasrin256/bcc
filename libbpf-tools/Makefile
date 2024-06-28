@@ -8,7 +8,7 @@ BPFTOOL ?= $(BPFTOOL_OUTPUT)/bootstrap/bpftool
 LIBBPF_SRC := $(abspath ../src/cc/libbpf/src)
 LIBBPF_OBJ := $(abspath $(OUTPUT)/libbpf.a)
 LIBBLAZESYM_SRC := $(abspath blazesym/target/release/libblazesym.a)
-INCLUDES := -I$(OUTPUT) -I../src/cc/libbpf/include/uapi
+INCLUDES := -I$(OUTPUT) -I../src/cc/libbpf/include/uapi -Ibpftool/include
 CFLAGS := -g -O2 -Wall -Wmissing-field-initializers -Werror
 BPFCFLAGS := -g -O2 -Wall
 INSTALL ?= install
@@ -112,6 +112,7 @@ COMMON_OBJ = \
 	$(OUTPUT)/uprobe_helpers.o \
 	$(OUTPUT)/btf_helpers.o \
 	$(OUTPUT)/compat.o \
+	$(OUTPUT)/bpftool/bootstrap/json_writer.o \
 	$(if $(ENABLE_MIN_CORE_BTFS),$(OUTPUT)/min_core_btf_tar.o) \
 	#
 
@@ -156,6 +157,8 @@ endif
 ifeq ($(USE_BLAZESYM),1)
 LDFLAGS += $(OUTPUT)/libblazesym.a -lrt -lpthread -ldl
 endif
+
+LDFLAGS += $(BPFTOOL)
 
 .PHONY: clean
 clean:

@@ -25,6 +25,7 @@
 #include "trace_helpers.h"
 #include "map_helpers.h"
 
+#include "bpftool/src/json_writer.h"
 #ifdef USE_BLAZESYM
 #include "blazesym.h"
 #endif
@@ -831,10 +832,114 @@ int alloc_size_compare(const void *a, const void *b)
 	return 0;
 }
 
+static bool json_output;
+json_writer_t *json_wtr;
+
+void test_json()
+{
+	json_wtr = jsonw_new(stdout);
+	if (!json_wtr) {
+		printf("failed to create JSON writer");
+		return ;
+	}
+	json_output = true;
+	jsonw_pretty(json_wtr, true);
+
+	json_writer_t *w = json_wtr;
+
+	if (json_output) {
+		jsonw_start_object(w);
+		jsonw_uint_field(w, "id", 1);
+		jsonw_string_field(w, "kind", "hello");
+		jsonw_string_field(w, "name", "bingbong");
+	}
+
+	if (json_output)
+		jsonw_end_object(json_wtr);
+	else
+		printf("\n");
+
+	if (json_output)
+		jsonw_destroy(&json_wtr);
+
+#if 0
+	jsonw_start_array(json_wtr);
+	jsonw_end_array(json_wtr);
+#endif
+}
+
+void test_json_array()
+{
+	json_wtr = jsonw_new(stdout);
+	if (!json_wtr) {
+		printf("failed to create JSON writer");
+		return ;
+	}
+	json_output = true;
+	jsonw_pretty(json_wtr, true);
+	//json_writer_t *w = json_wtr;
+
+	if (json_output) {
+		//jsonw_start_object(w);
+		//jsonw_name(json_wtr, "command");
+		jsonw_start_array(json_wtr);
+		for (int i = 0; i < 10; i++)
+			jsonw_uint(json_wtr, i);
+		jsonw_end_array(json_wtr);
+		//jsonw_name(json_wtr, "output");
+	}
+
+#if 0
+	if (json_output)
+		jsonw_end_object(json_wtr);
+	else
+		printf("\n");
+#endif
+	if (json_output)
+		jsonw_destroy(&json_wtr);
+
+#if 0
+	jsonw_start_array(json_wtr);
+	jsonw_end_array(json_wtr);
+#endif
+}
+
+void json_init(FILE *f)
+{
+	json_wtr = jsonw_new(f);
+	if (!json_wtr) {
+		printf("failed to create JSON writer");
+		return ;
+	}
+	jsonw_pretty(json_wtr, true);
+	jsonw_start_array(json_wtr);
+}
+
+void json_deinit(FILE *f)
+{
+	jsonw_end_array(json_wtr);
+	jsonw_destroy(&json_wtr);
+	fclose(f);
+}
+
+void json_add_alloc(struct raw_alloc_info *ra)
+{
+	json_writer_t *w = json_wtr;
+	jsonw_start_object(w);
+	jsonw_uint_field(w, "time", ra->timestamp_ns);
+	jsonw_uint_field(w, "addr", ra->addr);
+	jsonw_uint_field(w, "size", ra->size);
+	jsonw_uint_field(w, "stackid", ra->stack_id);
+	jsonw_uint_field(w, "pid", ra->pid);
+	jsonw_end_object(w);
+}
+
 int print_raw_allocs(int allocs_fd, int stack_traces_fd)
 {
 	int nr_cpus = libbpf_num_possible_cpus();
 	struct raw_alloc_info *allocs;
+	FILE *f = fopen("./memleak_allocs.out", "w");
+	json_init(f);
 
 	allocs = (struct raw_alloc_info *)malloc(sizeof(struct raw_alloc_info) * nr_cpus);
 	int i;
@@ -845,15 +950,17 @@ int print_raw_allocs(int allocs_fd, int stack_traces_fd)
 		if (bpf_map_lookup_elem(allocs_fd, &key, allocs) == 0) {
 			for (i = 0; i < nr_cpus; i++) {
 				struct raw_alloc_info *ra = &allocs[i];
-				if (ra->addr)
-					printf("key %u, CPU: %d, [%#llx] addr = %#llx, size = %llx, stackid: %x, pid: %llx\n",
-						key, i, ra->timestamp_ns, ra->addr, ra->size, ra->stack_id, ra->pid);
+				if (ra->addr) {
+					//printf("key %u, CPU: %d, [%#llx] addr = %#llx, size = %llx, stackid: %x, pid: %llx\n",
+					//	key, i, ra->timestamp_ns, ra->addr, ra->size, ra->stack_id, ra->pid);
+					json_add_alloc(ra);
+				}
 			}
 		} else
 			printf("bpf_map_lookup_elem failed: %s\n", strerror(errno));
 	}
 
-
+	json_deinit(f);
 	return 0;
 }
 
