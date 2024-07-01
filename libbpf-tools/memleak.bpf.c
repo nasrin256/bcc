@@ -25,6 +25,13 @@ struct {
 
 struct {
 	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__uint(max_entries, RAW_ALLOCS_MAX_ENTRIES);
+	__type(key, u32);
+	__type(value, struct raw_dealloc_info);
+} raw_deallocs SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
 	__uint(max_entries, 1);
 	__type(key, u32);
 	__type(value, u64);
@@ -120,6 +127,7 @@ static int gen_alloc_enter(size_t size)
 }
 
 static int ralloc_id[MAX_CPU_NR];
+static int rdealloc_id[MAX_CPU_NR];
 
 static int gen_alloc_exit2(void *ctx, u64 address)
 {
@@ -175,7 +183,6 @@ static int gen_alloc_exit2(void *ctx, u64 address)
 		rinfo.timestamp_ns = bpf_ktime_get_ns();
 		rinfo.addr = address;
 		rinfo.stack_id = bpf_get_stackid(ctx, &stack_traces, stack_flags);
-		//rinfo.pid = bpf_get_current_pid_tgid();
 		rinfo.pid = bpf_get_current_pid_tgid() >> 32;
 		bpf_map_update_elem(&raw_allocs, &key, &rinfo, BPF_ANY);
 	}
@@ -205,6 +212,22 @@ static int gen_free_enter(const void *address)
 		bpf_printk("free entered, address = %lx, size = %lu\n",
 				address, info->size);
 	}
+
+	//eslee
+	struct raw_dealloc_info rinfo;
+	__builtin_memset(&rinfo, 0, sizeof(rinfo));
+
+	if (addr != 0) {
+		u64 cpu = bpf_get_smp_processor_id();
+		u32 key = rdealloc_id[cpu];
+		rdealloc_id[cpu] += 1;
+
+		rinfo.timestamp_ns = bpf_ktime_get_ns();
+		rinfo.addr = addr;
+		rinfo.pid = bpf_get_current_pid_tgid() >> 32;
+		bpf_map_update_elem(&raw_deallocs, &key, &rinfo, BPF_ANY);
+	}
+	//eslee.
 
 	return 0;
 }

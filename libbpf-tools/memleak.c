@@ -152,6 +152,7 @@ static int alloc_size_compare(const void *a, const void *b);
 static int print_outstanding_allocs(int allocs_fd, int stack_traces_fd);
 static int print_outstanding_combined_allocs(int combined_allocs_fd, int stack_traces_fd);
 static int print_raw_allocs(int allocs_fd, int stack_traces_fd);
+static int print_raw_deallocs(int allocs_fd, int stack_traces_fd);
 
 static bool has_kernel_node_tracepoints();
 static void disable_kernel_node_tracepoints(struct memleak_bpf *skel);
@@ -383,6 +384,7 @@ int main(int argc, char *argv[])
 	const int combined_allocs_fd = bpf_map__fd(skel->maps.combined_allocs);
 	const int stack_traces_fd = bpf_map__fd(skel->maps.stack_traces);
 	const int raw_allocs_fd = bpf_map__fd(skel->maps.raw_allocs);
+	const int raw_deallocs_fd = bpf_map__fd(skel->maps.raw_deallocs);
 
 	// if userspace oriented, attach upbrobes
 	if (!env.kernel_trace) {
@@ -457,6 +459,7 @@ int main(int argc, char *argv[])
 			print_outstanding_allocs(allocs_fd, stack_traces_fd);
 
 		print_raw_allocs(raw_allocs_fd, stack_traces_fd);
+		print_raw_deallocs(raw_deallocs_fd, stack_traces_fd);
 	}
 
 	// after loop ends, check for child process and cleanup accordingly
@@ -934,6 +937,16 @@ void json_add_alloc(struct raw_alloc_info *ra)
 	jsonw_end_object(w);
 }
 
+void json_add_dealloc(struct raw_dealloc_info *ra)
+{
+	json_writer_t *w = json_wtr;
+	jsonw_start_object(w);
+	jsonw_uint_field(w, "time", ra->timestamp_ns);
+	jsonw_uint_field(w, "addr", ra->addr);
+	jsonw_uint_field(w, "pid", ra->pid);
+	jsonw_end_object(w);
+}
+
 int print_raw_allocs(int allocs_fd, int stack_traces_fd)
 {
 	int nr_cpus = libbpf_num_possible_cpus();
@@ -954,6 +967,36 @@ int print_raw_allocs(int allocs_fd, int stack_traces_fd)
 					//printf("key %u, CPU: %d, [%#llx] addr = %#llx, size = %llx, stackid: %x, pid: %llx\n",
 					//	key, i, ra->timestamp_ns, ra->addr, ra->size, ra->stack_id, ra->pid);
 					json_add_alloc(ra);
+				}
+			}
+		} else
+			printf("bpf_map_lookup_elem failed: %s\n", strerror(errno));
+	}
+
+	json_deinit(f);
+	return 0;
+}
+
+int print_raw_deallocs(int fd, int stack_traces_fd)
+{
+	int nr_cpus = libbpf_num_possible_cpus();
+	struct raw_dealloc_info *deallocs;
+	FILE *f = fopen("./memleak_frees.out", "w");
+	json_init(f);
+
+	deallocs = (struct raw_dealloc_info *)malloc(sizeof(struct raw_dealloc_info) * nr_cpus);
+	int i;
+	int key;
+
+	for (key = 0; key < RAW_ALLOCS_MAX_ENTRIES; key++) {
+		memset(deallocs, 0x0, sizeof(struct raw_dealloc_info) * nr_cpus);
+		if (bpf_map_lookup_elem(fd, &key, deallocs) == 0) {
+			for (i = 0; i < nr_cpus; i++) {
+				struct raw_dealloc_info *ra = &deallocs[i];
+				if (ra->addr) {
+					//printf("key %u, CPU: %d, [%#llx] addr = %#llx, size = %llx, stackid: %x, pid: %llx\n",
+					//	key, i, ra->timestamp_ns, ra->addr, ra->size, ra->stack_id, ra->pid);
+					json_add_dealloc(ra);
 				}
 			}
 		} else
