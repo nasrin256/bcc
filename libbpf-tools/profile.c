@@ -64,6 +64,7 @@ static struct env {
 	bool delimiter;
 	bool include_idle;
 	int cpu;
+	bool scan;
 } env = {
 	.stack_storage_size = 1024,
 	.perf_max_stack_depth = 127,
@@ -103,6 +104,7 @@ static const struct argp_option opts[] = {
 	{ "stack-storage-size", OPT_STACK_STORAGE_SIZE, "STACK-STORAGE-SIZE", 0,
 	  "the number of unique stack traces that can be stored and displayed (default 1024)", 0 },
 	{ "cpu", 'C', "CPU", 0, "cpu number to run profile on", 0 },
+	{ "scan", 's', "CPU", 0, "cpu number to run profile on", 0 },
 	{ "perf-max-stack-depth", OPT_PERF_MAX_STACK_DEPTH,
 	  "PERF-MAX-STACK-DEPTH", 0, "the limit for both kernel and user stack traces (default 127)", 0 },
 	{ "verbose", 'v', NULL, 0, "Verbose debug output", 0 },
@@ -198,6 +200,9 @@ static error_t parse_arg(int key, char *arg, struct argp_state *state)
 			fprintf(stderr, "invalid CPU: %s\n", arg);
 			argp_usage(state);
 		}
+		break;
+	case 's':
+		env.scan = true;
 		break;
 	case OPT_PERF_MAX_STACK_DEPTH:
 		errno = 0;
@@ -512,6 +517,7 @@ int main(int argc, char **argv)
 	obj->rodata->user_stacks_only = env.user_stacks_only;
 	obj->rodata->kernel_stacks_only = env.kernel_stacks_only;
 	obj->rodata->include_idle = env.include_idle;
+	obj->rodata->scan = env.scan;
 	if (env.pids[0])
 		obj->rodata->filter_by_pid = true;
 	else if (env.tids[0])

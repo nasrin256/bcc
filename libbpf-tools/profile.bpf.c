@@ -17,6 +17,7 @@ const volatile bool user_stacks_only = false;
 const volatile bool include_idle = false;
 const volatile bool filter_by_pid = false;
 const volatile bool filter_by_tid = false;
+const volatile bool scan = false;
 
 struct {
 	__uint(type, BPF_MAP_TYPE_STACK_TRACE);
@@ -44,6 +45,8 @@ struct {
 	__uint(max_entries, MAX_TID_NR);
 } tids SEC(".maps");
 
+#define BPF_F_USER_STACK_SCAN           (1ULL << 12)
+
 SEC("perf_event")
 int do_perf_event(struct bpf_perf_event_data *ctx)
 {
@@ -53,6 +56,10 @@ int do_perf_event(struct bpf_perf_event_data *ctx)
 	u64 *valp;
 	static const u64 zero;
 	struct key_t key = {};
+	int flags = BPF_F_USER_STACK;
+
+	if (scan)
+		flags |= BPF_F_USER_STACK_SCAN;
 
 	if (!include_idle && tid == 0)
 		return 0;
@@ -75,7 +82,7 @@ int do_perf_event(struct bpf_perf_event_data *ctx)
 		key.user_stack_id = -1;
 	else
 		key.user_stack_id = bpf_get_stackid(&ctx->regs, &stackmap,
-						    BPF_F_USER_STACK);
+						    flags);
 
 	valp = bpf_map_lookup_or_try_init(&counts, &key, &zero);
 	if (valp)
