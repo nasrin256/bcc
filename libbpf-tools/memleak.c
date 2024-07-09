@@ -930,6 +930,7 @@ void sync_time(struct time_sync *sync) {
     clock_gettime(CLOCK_REALTIME, &sync->real_time);
 }
 
+#if 0
 // 나노초 단위의 커널 시간을 Unix 타임스탬프로 변환하는 함수
 time_t convert_to_unix_timestamp(uint64_t kernel_ns, struct time_sync *sync) {
     uint64_t elapsed_ns = kernel_ns - (sync->monotonic_time.tv_sec * 1000000000 + sync->monotonic_time.tv_nsec);
@@ -948,10 +949,19 @@ time_t convert_to_unix_timestamp(uint64_t kernel_ns, struct time_sync *sync) {
 
     return result_time.tv_sec;
 }
+#endif
+
+// 나노초 단위의 커널 시간을 나노초 단위의 실제 시간으로 변환하는 함수
+uint64_t convert_to_realtime_ns(uint64_t kernel_ns, struct time_sync *sync) {
+    uint64_t elapsed_ns = kernel_ns - (sync->monotonic_time.tv_sec * 1000000000 + sync->monotonic_time.tv_nsec);
+    uint64_t real_time_ns = (sync->real_time.tv_sec * 1000000000 + sync->real_time.tv_nsec) + elapsed_ns;
+
+    return real_time_ns;
+}
 
 time_t get_unix_ts(unsigned long kernel_ns)
 {
-	return convert_to_unix_timestamp(kernel_ns, &g_sync);
+	return convert_to_realtime_ns(kernel_ns, &g_sync);
 }
 
 void json_init(FILE *f)
