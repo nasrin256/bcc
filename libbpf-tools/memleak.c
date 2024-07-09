@@ -237,6 +237,18 @@ static struct allocation *allocs;
 
 static const char default_object[] = "libc.so.6";
 
+//eslee
+// 커널 시간과 실제 시간을 동기화하는 구조체
+struct time_sync {
+    struct timespec monotonic_time;
+    struct timespec real_time;
+};
+
+struct time_sync g_sync;
+
+void sync_time(struct time_sync *sync);
+//eslee.
+
 int main(int argc, char *argv[])
 {
 	int ret = 0;
@@ -247,6 +259,8 @@ int main(int argc, char *argv[])
 		.parser = argp_parse_arg,
 		.doc = argp_args_doc,
 	};
+
+	sync_time(&g_sync);
 
 	// parse command line args to env settings
 	if (argp_parse(&argp, argc, argv, 0, NULL, NULL)) {
@@ -907,6 +921,39 @@ void test_json_array()
 #endif
 }
 
+// 커널 시간과 실제 시간을 동기화하는 함수
+void sync_time(struct time_sync *sync) {
+    // 모노토닉 시간 가져오기
+    clock_gettime(CLOCK_MONOTONIC, &sync->monotonic_time);
+
+    // 실제 시간 가져오기
+    clock_gettime(CLOCK_REALTIME, &sync->real_time);
+}
+
+// 나노초 단위의 커널 시간을 Unix 타임스탬프로 변환하는 함수
+time_t convert_to_unix_timestamp(uint64_t kernel_ns, struct time_sync *sync) {
+    uint64_t elapsed_ns = kernel_ns - (sync->monotonic_time.tv_sec * 1000000000 + sync->monotonic_time.tv_nsec);
+    time_t elapsed_sec = elapsed_ns / 1000000000;
+    long elapsed_nsec = elapsed_ns % 1000000000;
+
+    struct timespec result_time;
+    result_time.tv_sec = sync->real_time.tv_sec + elapsed_sec;
+    result_time.tv_nsec = sync->real_time.tv_nsec + elapsed_nsec;
+
+    // 나노초가 1초를 초과하면 초 단위로 올림
+    if (result_time.tv_nsec >= 1000000000) {
+        result_time.tv_sec += 1;
+        result_time.tv_nsec -= 1000000000;
+    }
+
+    return result_time.tv_sec;
+}
+
+time_t get_unix_ts(unsigned long kernel_ns)
+{
+	return convert_to_unix_timestamp(kernel_ns, &g_sync);
+}
+
 void json_init(FILE *f)
 {
 	json_wtr = jsonw_new(f);
@@ -929,7 +976,8 @@ void json_add_alloc(struct raw_alloc_info *ra)
 {
 	json_writer_t *w = json_wtr;
 	jsonw_start_object(w);
-	jsonw_uint_field(w, "time", ra->timestamp_ns);
+	//jsonw_uint_field(w, "time", ra->timestamp_ns);
+	jsonw_uint_field(w, "time", get_unix_ts(ra->timestamp_ns));
 	jsonw_uint_field(w, "addr", ra->addr);
 	jsonw_uint_field(w, "size", ra->size);
 	jsonw_uint_field(w, "stackid", ra->stack_id);
@@ -941,7 +989,8 @@ void json_add_dealloc(struct raw_dealloc_info *ra)
 {
 	json_writer_t *w = json_wtr;
 	jsonw_start_object(w);
-	jsonw_uint_field(w, "time", ra->timestamp_ns);
+	//jsonw_uint_field(w, "time", ra->timestamp_ns);
+	jsonw_uint_field(w, "time", get_unix_ts(ra->timestamp_ns));
 	jsonw_uint_field(w, "addr", ra->addr);
 	jsonw_uint_field(w, "pid", ra->pid);
 	jsonw_end_object(w);
