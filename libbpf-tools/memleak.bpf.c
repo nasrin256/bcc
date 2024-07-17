@@ -17,6 +17,12 @@ const volatile __u64 stack_flags = 0;
 const volatile bool wa_missing_free = false;
 
 struct {
+	__uint(type, BPF_MAP_TYPE_PERF_EVENT_ARRAY);
+	__uint(key_size, sizeof(__u32));
+	__uint(value_size, sizeof(__u32));
+} events SEC(".maps");
+
+struct {
 	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
 	__uint(max_entries, RAW_ALLOCS_MAX_ENTRIES);
 	__type(key, u32);
@@ -188,6 +194,8 @@ static int gen_alloc_exit2(void *ctx, u64 address)
 	}
 
 	// eslee.
+
+	bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU, &rinfo, sizeof(rinfo));
 
 	return 0;
 }

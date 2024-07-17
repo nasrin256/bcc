@@ -249,10 +249,30 @@ struct time_sync g_sync;
 void sync_time(struct time_sync *sync);
 //eslee.
 
+#define PERF_BUFFER_PAGES	16
+#define PERF_POLL_TIMEOUT_MS	100
+#define warn(...) fprintf(stderr, __VA_ARGS__)
+
+static volatile sig_atomic_t exiting = 0;
+
+static void handle_event(void *ctx, int cpu, void *data, __u32 data_size);
+
+static void handle_lost_events(void *ctx, int cpu, __u64 lost_cnt)
+{
+	printf("lost %llu events on CPU #%d\n", lost_cnt, cpu);
+}
+
+static void sig_int(int signo)
+{
+	exiting = 1;
+}
+
 int main(int argc, char *argv[])
 {
 	int ret = 0;
 	struct memleak_bpf *skel = NULL;
+	struct perf_buffer *pb = NULL;
+	int err;
 
 	static const struct argp argp = {
 		.options = argp_options,
@@ -394,11 +414,13 @@ int main(int argc, char *argv[])
 		goto cleanup;
 	}
 
+#if 1
 	const int allocs_fd = bpf_map__fd(skel->maps.allocs);
 	const int combined_allocs_fd = bpf_map__fd(skel->maps.combined_allocs);
 	const int stack_traces_fd = bpf_map__fd(skel->maps.stack_traces);
 	const int raw_allocs_fd = bpf_map__fd(skel->maps.raw_allocs);
 	const int raw_deallocs_fd = bpf_map__fd(skel->maps.raw_deallocs);
+#endif
 
 	// if userspace oriented, attach upbrobes
 	if (!env.kernel_trace) {
@@ -461,6 +483,31 @@ int main(int argc, char *argv[])
 
 	printf("Tracing outstanding memory allocs...  Hit Ctrl-C to end\n");
 
+	pb = perf_buffer__new(bpf_map__fd(skel->maps.events), PERF_BUFFER_PAGES,
+			      handle_event, handle_lost_events, NULL, NULL);
+	if (!pb) {
+		err = -errno;
+		warn("failed to open perf buffer: %d\n", err);
+		goto cleanup;
+	}
+
+	if (signal(SIGINT, sig_int) == SIG_ERR) {
+		warn("can't set signal handler: %s\n", strerror(errno));
+		err = 1;
+		goto cleanup;
+	}
+
+	while (!exiting) {
+		sleep(10);
+		err = perf_buffer__poll(pb, PERF_POLL_TIMEOUT_MS);
+		if (err < 0 && err != -EINTR) {
+			warn("error polling perf buffer: %s\n", strerror(-err));
+			goto cleanup;
+		}
+		err = 0;
+	}
+
+#if 1
 	// main loop
 	while (!exiting && env.nr_intervals) {
 		env.nr_intervals--;
@@ -496,6 +543,7 @@ int main(int argc, char *argv[])
 		}
 		printf("reaped child process\n");
 	}
+#endif
 
 cleanup:
 #ifdef USE_BLAZESYM
@@ -511,6 +559,7 @@ cleanup:
 	free(allocs);
 	free(stack);
 
+	perf_buffer__free(pb);
 	printf("done\n");
 
 	return ret;
@@ -1004,6 +1053,35 @@ void json_add_dealloc(struct raw_dealloc_info *ra)
 	jsonw_uint_field(w, "addr", ra->addr);
 	jsonw_uint_field(w, "pid", ra->pid);
 	jsonw_end_object(w);
+}
+
+static void handle_event(void *ctx, int cpu, void *data, __u32 data_size)
+{
+#if 0
+	struct str_t *e = data;
+	struct tm *tm;
+	char ts[16];
+	time_t t;
+
+	time(&t);
+	tm = localtime(&t);
+	strftime(ts, sizeof(ts), "%H:%m:%S", tm);
+
+	printf("%-9s %-7d %s\n", ts, e->pid, e->str);
+#endif
+
+
+	struct raw_alloc_info *alloc = data;
+	printf("CPU: %d, [%#llx] addr = %#llx, size = %llx, stackid: %x, pid: %llx\n",
+		cpu, alloc->timestamp_ns, alloc->addr, alloc->size, alloc->stack_id, alloc->pid);
+
+	FILE *f = fopen("./memleak_allocs.out", "w");
+	json_init(f);
+
+	json_add_alloc(alloc);
+
+	json_deinit(f);
+	//return 0;
 }
 
 int print_raw_allocs(int allocs_fd, int stack_traces_fd)
