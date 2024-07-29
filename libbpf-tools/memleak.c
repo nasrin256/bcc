@@ -250,7 +250,7 @@ void sync_time(struct time_sync *sync);
 //eslee.
 
 #define PERF_BUFFER_PAGES	16
-#define PERF_POLL_TIMEOUT_MS	100
+#define PERF_POLL_TIMEOUT_MS	10000
 #define warn(...) fprintf(stderr, __VA_ARGS__)
 
 static volatile sig_atomic_t exiting = 0;
@@ -266,6 +266,9 @@ static void sig_int(int signo)
 {
 	exiting = 1;
 }
+
+static int init_outfile();
+static int deinit_outfile();
 
 int main(int argc, char *argv[])
 {
@@ -481,6 +484,8 @@ int main(int argc, char *argv[])
 	}
 #endif
 
+	init_outfile();
+
 	printf("Tracing outstanding memory allocs...  Hit Ctrl-C to end\n");
 
 	pb = perf_buffer__new(bpf_map__fd(skel->maps.events), PERF_BUFFER_PAGES,
@@ -562,6 +567,7 @@ cleanup:
 	perf_buffer__free(pb);
 	printf("done\n");
 
+	deinit_outfile();
 	return ret;
 }
 
@@ -1075,13 +1081,27 @@ static void handle_event(void *ctx, int cpu, void *data, __u32 data_size)
 	printf("CPU: %d, [%#llx] addr = %#llx, size = %llx, stackid: %x, pid: %llx\n",
 		cpu, alloc->timestamp_ns, alloc->addr, alloc->size, alloc->stack_id, alloc->pid);
 
-	FILE *f = fopen("./memleak_allocs.out", "w");
-	json_init(f);
 
 	json_add_alloc(alloc);
 
-	json_deinit(f);
 	//return 0;
+}
+
+FILE *f;
+static int init_outfile()
+{
+	//FILE *f = fopen("./memleak_allocs.out", "w");
+	f = fopen("./memleak_allocs.out", "w");
+	json_init(f);
+
+	return 0;
+}
+
+static int deinit_outfile()
+{
+	json_deinit(f);
+
+	return 0;
 }
 
 int print_raw_allocs(int allocs_fd, int stack_traces_fd)
