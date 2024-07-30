@@ -36,6 +36,7 @@ BZ_APPS = \
 	futexctn \
 	memleak \
 	opensnoop \
+	allocsnoop \
 	#
 
 APPS = \
