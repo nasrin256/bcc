@@ -17,16 +17,14 @@ const volatile __u64 stack_flags = 0;
 const volatile bool wa_missing_free = false;
 
 struct {
-	__uint(type, BPF_MAP_TYPE_PERF_EVENT_ARRAY);
-	__uint(key_size, sizeof(__u32));
-	__uint(value_size, sizeof(__u32));
-} alloc_events SEC(".maps");
+	__uint(type, BPF_MAP_TYPE_RINGBUF);
+	__uint(max_entries, RING_BUF_MAX_SIZE);
+} rb_alloc SEC(".maps");
 
 struct {
-	__uint(type, BPF_MAP_TYPE_PERF_EVENT_ARRAY);
-	__uint(key_size, sizeof(__u32));
-	__uint(value_size, sizeof(__u32));
-} dealloc_events SEC(".maps");
+	__uint(type, BPF_MAP_TYPE_RINGBUF);
+	__uint(max_entries, RING_BUF_MAX_SIZE);
+} rb_dealloc SEC(".maps");
 
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
@@ -89,7 +87,7 @@ static int gen_alloc_exit2(void *ctx, u64 address)
 
 		info.pid = bpf_get_current_pid_tgid() >> 32;
 
-		bpf_perf_event_output(ctx, &alloc_events, BPF_F_CURRENT_CPU, &info, sizeof(info));
+		bpf_ringbuf_output(&rb_alloc, &info, sizeof(info), 0);
 	}
 
 	if (trace_all) {
@@ -122,7 +120,7 @@ static int gen_free_enter(void *ctx, const void *address)
 
 		info.pid = bpf_get_current_pid_tgid() >> 32;
 
-		bpf_perf_event_output(ctx, &dealloc_events, BPF_F_CURRENT_CPU, &info, sizeof(info));
+		bpf_ringbuf_output(&rb_dealloc, &info, sizeof(info), 0);
 	}
 
 	return 0;
