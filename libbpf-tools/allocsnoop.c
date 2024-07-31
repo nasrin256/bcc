@@ -199,13 +199,8 @@ json_writer_t *json_wtr_alloc;
 json_writer_t *json_wtr_dealloc;
 json_writer_t *json_wtr_stacktrace;
 
-static void handle_alloc_event(void *ctx, int cpu, void *data, __u32 data_size);
-static void handle_dealloc_event(void *ctx, int cpu, void *data, __u32 data_size);
-
-static void handle_lost_events(void *ctx, int cpu, __u64 lost_cnt)
-{
-	printf("lost %llu events on CPU #%d\n", lost_cnt, cpu);
-}
+static int handle_alloc_event(void *ctx, void *data, size_t data_size);
+static int handle_dealloc_event(void *ctx, void *data, size_t data_size);
 
 static void sig_int(int signo)
 {
@@ -219,8 +214,8 @@ int main(int argc, char *argv[])
 {
 	int ret = 0;
 	struct allocsnoop_bpf *skel = NULL;
-	struct perf_buffer *alloc_pb = NULL;
-	struct perf_buffer *dealloc_pb = NULL;
+	struct ring_buffer *alloc_rb = NULL;
+	struct ring_buffer *dealloc_rb = NULL;
 	FILE *f_alloc = NULL;
 	FILE *f_dealloc = NULL;
 	FILE *f_stacktrace = NULL;
@@ -340,19 +335,19 @@ int main(int argc, char *argv[])
 	init_outfile(&f_dealloc, FILENAME_DEALLOCS, &json_wtr_dealloc);
 	init_outfile(&f_stacktrace, FILENAME_STACKTRACES, &json_wtr_stacktrace);
 
-	alloc_pb = perf_buffer__new(bpf_map__fd(skel->maps.alloc_events), PERF_BUFFER_PAGES,
-				    handle_alloc_event, handle_lost_events, skel, NULL);
-	if (!alloc_pb) {
+	alloc_rb = ring_buffer__new(bpf_map__fd(skel->maps.rb_alloc),
+				    handle_alloc_event, skel, NULL);
+	if (!alloc_rb) {
 		err = -errno;
-		warn("failed to open perf buffer: %d\n", err);
+		warn("failed to open ring buffer: %d\n", err);
 		goto cleanup;
 	}
 
-	dealloc_pb = perf_buffer__new(bpf_map__fd(skel->maps.dealloc_events), PERF_BUFFER_PAGES,
-				      handle_dealloc_event, handle_lost_events, NULL, NULL);
-	if (!dealloc_pb) {
+	dealloc_rb = ring_buffer__new(bpf_map__fd(skel->maps.rb_dealloc),
+				      handle_dealloc_event, NULL, NULL);
+	if (!dealloc_rb) {
 		err = -errno;
-		warn("failed to open perf buffer: %d\n", err);
+		warn("failed to open ring buffer: %d\n", err);
 		goto cleanup;
 	}
 
@@ -367,15 +362,15 @@ int main(int argc, char *argv[])
 	while (!exiting) {
 		sleep(env.interval);
 
-		err = perf_buffer__poll(alloc_pb, PERF_POLL_TIMEOUT_MS);
+		err = ring_buffer__poll(alloc_rb, PERF_POLL_TIMEOUT_MS);
 		if (err < 0 && err != -EINTR) {
-			warn("error polling perf buffer: %s\n", strerror(-err));
+			warn("error polling ring buffer: %s\n", strerror(-err));
 			goto cleanup;
 		}
 
-		err = perf_buffer__poll(dealloc_pb, PERF_POLL_TIMEOUT_MS);
+		err = ring_buffer__poll(dealloc_rb, PERF_POLL_TIMEOUT_MS);
 		if (err < 0 && err != -EINTR) {
-			warn("error polling perf buffer: %s\n", strerror(-err));
+			warn("error polling ring buffer: %s\n", strerror(-err));
 			goto cleanup;
 		}
 		err = 0;
@@ -389,8 +384,8 @@ cleanup:
 
 	free(allocs);
 	free(stack);
-	perf_buffer__free(alloc_pb);
-	perf_buffer__free(dealloc_pb);
+	ring_buffer__free(alloc_rb);
+	ring_buffer__free(dealloc_rb);
 	deinit_outfile(f_alloc, json_wtr_alloc);
 	deinit_outfile(f_dealloc, json_wtr_dealloc);
 	deinit_outfile(f_stacktrace, json_wtr_stacktrace);
@@ -615,29 +610,33 @@ static void handle_stacktrace(void *ctx, int stack_id, pid_t pid)
 	json_add_stacktrace(stack_id, stack, pid);
 }
 
-static void handle_alloc_event(void *ctx, int cpu, void *data, __u32 data_size)
+static int handle_alloc_event(void *ctx, void *data, size_t data_size)
 {
 	struct alloc_info *alloc = data;
 
 	if (env.verbose)
-		fprintf(stdout, "CPU: %d, [%#llx] addr = %#llx, size = %llx, "
-			"stackid: %x, pid: %llx\n", cpu, alloc->timestamp_ns,
-			alloc->addr, alloc->size, alloc->stack_id, alloc->pid);
+		fprintf(stdout, "[%#llx] addr = %#llx, size = %llx, stackid: %x, "
+			"pid: %llx\n", alloc->timestamp_ns, alloc->addr, alloc->size,
+			alloc->stack_id, alloc->pid);
 
 	json_add_alloc(alloc);
 
 	handle_stacktrace(ctx, alloc->stack_id, alloc->pid);
+
+	return 0;
 }
 
-static void handle_dealloc_event(void *ctx, int cpu, void *data, __u32 data_size)
+static int handle_dealloc_event(void *ctx, void *data, size_t data_size)
 {
 	struct dealloc_info *dealloc = data;
 
 	if (env.verbose)
-		fprintf(stdout, "CPU: %d, [%#llx] addr = %#llx, pid: %llx\n",
-			cpu, dealloc->timestamp_ns, dealloc->addr, dealloc->pid);
+		fprintf(stdout, "[%#llx] addr = %#llx, pid: %llx\n",
+			dealloc->timestamp_ns, dealloc->addr, dealloc->pid);
 
 	json_add_dealloc(dealloc);
+
+	return 0;
 }
 
 static int init_outfile(FILE **f, char *fname, json_writer_t **json_wtr)

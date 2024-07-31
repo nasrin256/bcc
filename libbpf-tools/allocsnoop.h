@@ -2,6 +2,8 @@
 #ifndef __ALLOCSNOOP_H
 #define __ALLOCSNOOP_H
 
+#define RING_BUF_MAX_SIZE	(1 << 23) /* 8MB */
+
 struct alloc_info {
 	__u64 timestamp_ns;
 	__u64 addr;
