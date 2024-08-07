@@ -3,6 +3,18 @@
 #define __ALLOCSNOOP_H
 
 #define RING_BUF_MAX_SIZE	(1 << 23) /* 8MB */
+#define ERR_RING_BUF_MAX_SIZE	(16)
+
+enum allocsnoop_err_types {
+	E_RB_ALLOC,
+	E_RB_DEALLOC,
+	E_MAXTYPE,
+};
+
+struct allocsnoop_err_info {
+	__u32 type;
+	__u32 err;
+};
 
 struct alloc_info {
 	__u64 timestamp_ns;

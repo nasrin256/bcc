@@ -27,6 +27,11 @@ struct {
 } rb_dealloc SEC(".maps");
 
 struct {
+	__uint(type, BPF_MAP_TYPE_RINGBUF);
+	__uint(max_entries, ERR_RING_BUF_MAX_SIZE);
+} rb_err SEC(".maps");
+
+struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
 	__type(key, u32);
 	__type(value, u64);
@@ -68,6 +73,7 @@ static int gen_alloc_exit2(void *ctx, u64 address)
 {
 	const u32 tid = bpf_get_current_pid_tgid();
 	struct alloc_info info;
+	int ret;
 
 	const u64* size = bpf_map_lookup_elem(&sizes, &tid);
 	if (!size)
@@ -87,7 +93,16 @@ static int gen_alloc_exit2(void *ctx, u64 address)
 
 		info.pid = bpf_get_current_pid_tgid() >> 32;
 
-		bpf_ringbuf_output(&rb_alloc, &info, sizeof(info), 0);
+		ret = bpf_ringbuf_output(&rb_alloc, &info, sizeof(info), 0);
+		if (ret < 0) {
+			struct allocsnoop_err_info e_info;
+			e_info.type = E_RB_ALLOC;
+			e_info.err = ret;
+
+			ret = bpf_ringbuf_output(&rb_err, &e_info, sizeof(e_info), 0);
+			if (ret < 0)
+				bpf_printk("rb_err: failed to output\n");
+		}
 	}
 
 	if (trace_all) {
@@ -107,6 +122,7 @@ static int gen_free_enter(void *ctx, const void *address)
 {
 	const u64 addr = (u64)address;
 	struct dealloc_info info;
+	int ret;
 
 	if (trace_all)
 		bpf_printk("free entered, address = %lx\n", address);
@@ -120,7 +136,16 @@ static int gen_free_enter(void *ctx, const void *address)
 
 		info.pid = bpf_get_current_pid_tgid() >> 32;
 
-		bpf_ringbuf_output(&rb_dealloc, &info, sizeof(info), 0);
+		ret = bpf_ringbuf_output(&rb_dealloc, &info, sizeof(info), 0);
+		if (ret < 0) {
+			struct allocsnoop_err_info e_info;
+			e_info.type = E_RB_DEALLOC;
+			e_info.err = ret;
+
+			ret = bpf_ringbuf_output(&rb_err, &e_info, sizeof(e_info), 0);
+			if (ret < 0)
+				bpf_printk("rb_err: failed to output\n");
+		}
 	}
 
 	return 0;

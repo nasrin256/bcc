@@ -199,6 +199,7 @@ json_writer_t *json_wtr_alloc;
 json_writer_t *json_wtr_dealloc;
 json_writer_t *json_wtr_stacktrace;
 
+static int handle_err_event(void *ctx, void *data, size_t data_size);
 static int handle_alloc_event(void *ctx, void *data, size_t data_size);
 static int handle_dealloc_event(void *ctx, void *data, size_t data_size);
 
@@ -216,6 +217,7 @@ int main(int argc, char *argv[])
 	struct allocsnoop_bpf *skel = NULL;
 	struct ring_buffer *alloc_rb = NULL;
 	struct ring_buffer *dealloc_rb = NULL;
+	struct ring_buffer *err_rb = NULL;
 	FILE *f_alloc = NULL;
 	FILE *f_dealloc = NULL;
 	FILE *f_stacktrace = NULL;
@@ -351,6 +353,14 @@ int main(int argc, char *argv[])
 		goto cleanup;
 	}
 
+	err_rb = ring_buffer__new(bpf_map__fd(skel->maps.rb_err),
+				  handle_err_event, NULL, NULL);
+	if (!err_rb) {
+		err = -errno;
+		warn("failed to open ring buffer: %d\n", err);
+		goto cleanup;
+	}
+
 	printf("Tracing memory allocs...  Hit Ctrl-C to end\n");
 
 	if (signal(SIGINT, sig_int) == SIG_ERR) {
@@ -361,6 +371,12 @@ int main(int argc, char *argv[])
 
 	while (!exiting) {
 		sleep(env.interval);
+
+		err = ring_buffer__poll(err_rb, PERF_POLL_TIMEOUT_MS);
+		if (err < 0 && err != -EINTR) {
+			warn("error polling ring buffer: %s\n", strerror(-err));
+			goto cleanup;
+		}
 
 		err = ring_buffer__poll(alloc_rb, PERF_POLL_TIMEOUT_MS);
 		if (err < 0 && err != -EINTR) {
@@ -373,6 +389,7 @@ int main(int argc, char *argv[])
 			warn("error polling ring buffer: %s\n", strerror(-err));
 			goto cleanup;
 		}
+
 		err = 0;
 	}
 
@@ -608,6 +625,14 @@ static void handle_stacktrace(void *ctx, int stack_id, pid_t pid)
 	}
 
 	json_add_stacktrace(stack_id, stack, pid);
+}
+
+static int handle_err_event(void *ctx, void *data, size_t data_size)
+{
+	struct allocsnoop_err_info *e = data;
+
+	fprintf(stderr, "error event received, type: %d, err: %d\n", e->type, e->err);
+	return 0;
 }
 
 static int handle_alloc_event(void *ctx, void *data, size_t data_size)
