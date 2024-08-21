@@ -23,14 +23,14 @@ struct edges_key_t {
 struct edges_leaf_t {
 	__u64 mutex1_stack_id;
 	__u64 mutex2_stack_id;
-	__u32 thread_pid;
+	__u32 tid;
 	char comm[TASK_COMM_LEN];
 };
 
 /* Info about parent thread when a child thread is created. */
 struct thread_created_leaf_t {
 	__u64 stack_id;
-	__u32 parent_pid;
+	__u32 parent_tid;
 	char comm[TASK_COMM_LEN];
 };
 

@@ -213,6 +213,7 @@ static int libbpf_print_fn(enum libbpf_print_level level, const char *format, va
 {
 	if (level == LIBBPF_DEBUG && !env.verbose)
 		return 0;
+
 	return vfprintf(stderr, format, args);
 }
 
@@ -221,7 +222,7 @@ static void sig_handler(int sig)
 	exiting = true;
 }
 
-static int get_edge_key(__u64 m, __u64 n)
+static int generate_edge_key(__u64 m, __u64 n)
 {
 	__u64 data[2] = {m, n};
 
@@ -229,8 +230,8 @@ static int get_edge_key(__u64 m, __u64 n)
 }
 
 template <typename N, typename A>
-static bool read_edges_map(int fd, digraph<N, A>& g,
-			   std::map<A, struct edges_leaf_t>& edge_map)
+static bool create_dep_graph(int fd, std::map<A, struct edges_leaf_t>& edge_map,
+			     digraph<N, A>& g)
 {
 	struct edges_key_t lookup_key = {}, next_key;
 	struct edges_leaf_t val;
@@ -249,10 +250,10 @@ static bool read_edges_map(int fd, digraph<N, A>& g,
 			printf("[0x%016llx -> 0x%016llx] sid1: 0x%llx, sid2: 0x%llx, tid: %d, name:%s\n",
 						 next_key.mutex1, next_key.mutex2,
 						 val.mutex1_stack_id, val.mutex2_stack_id,
-						 val.thread_pid, val.comm);
+						 val.tid, val.comm);
 		}
 
-		edge_key = get_edge_key(next_key.mutex1, next_key.mutex2);
+		edge_key = generate_edge_key(next_key.mutex1, next_key.mutex2);
 
 		/* add edge to graph */
 		g.add((const __u64)next_key.mutex1, (const __u64)next_key.mutex2, edge_key);
@@ -374,7 +375,7 @@ static void print_cycle(int sfd, const struct syms *syms, const std::vector<N>& 
 	for (i = 0; i < cycle.size(); i++) {
 		__u64 m = cycle[i];
 		__u64 n = cycle[(i+1) % cycle.size()];
-		edge_key = get_edge_key(m, n);
+		edge_key = generate_edge_key(m, n);
 
 		if (env.verbose)
 			printf("get edge map, mutex1: 0x%016llx, mutex2: 0x%016llx\n", m, n);
@@ -387,15 +388,15 @@ static void print_cycle(int sfd, const struct syms *syms, const std::vector<N>& 
 
 		attr = &(ret->second);
 
-		thread_set.insert(attr->thread_pid);
+		thread_set.insert(attr->tid);
 
 		printf("%s acquired here while holding %s in Thread %d (%s):\n",
-		       node_name[n].c_str(), node_name[m].c_str(), attr->thread_pid, attr->comm);
+		       node_name[n].c_str(), node_name[m].c_str(), attr->tid, attr->comm);
 		print_stack_trace(sfd, syms, attr->mutex2_stack_id);
 		printf("\n");
 
 		printf("%s previously acquired by the same Thread %d (%s) here:\n",
-		       node_name[m].c_str(), attr->thread_pid, attr->comm);
+		       node_name[m].c_str(), attr->tid, attr->comm);
 		print_stack_trace(sfd, syms, attr->mutex1_stack_id);
 		printf("\n");
 	}
@@ -405,8 +406,8 @@ static void print_cycle(int sfd, const struct syms *syms, const std::vector<N>& 
 		auto c = m_parent.find(tid);
 		struct thread_created_leaf_t *p = &(c->second);
 
-		if (p->parent_pid) {
-			printf("Thread %d created by Thread %d (%s) here:\n", tid, p->parent_pid, p->comm);
+		if (p->parent_tid) {
+			printf("Thread %d created by Thread %d (%s) here:\n", tid, p->parent_tid, p->comm);
 			print_stack_trace(sfd, syms, p->stack_id);
 		} else {
 			printf("Could not find stack trace where Thread %d was created\n", tid);
@@ -435,46 +436,11 @@ static std::vector<N> cycle(const digraph<N, A> &scc)
 	}
 }
 
-static bool print_map(const struct syms *syms, struct deadlock_bpf *obj)
+template <typename N, typename A>
+static bool print_cycles(const struct syms *syms, struct deadlock_bpf *obj,
+			 std::map<A, struct edges_leaf_t>& m_edge,
+			 std::map<__u32, struct thread_created_leaf_t>& m_parent)
 {
-	int efd, tfd, sfd;
-	int nr_mutex = 0;
-	int nr_edge = 0;
-	digraph<__u64, int> g;
-	std::map<int, struct edges_leaf_t> edge_map;
-	std::map<__u32, struct thread_created_leaf_t> parent_map;
-
-	tfd = bpf_map__fd(obj->maps.thread_to_parent);
-	efd = bpf_map__fd(obj->maps.edges);
-	sfd = bpf_map__fd(obj->maps.stack_traces);
-
-	/* Map of child thread pid -> parent info */
-	if (!read_threads_map(tfd, parent_map)) {
-		return false;
-	}
-
-	/* Mutex wait directed graph. Nodes are mutexes. Edge (A,B) exists
-	 * if there exists some thread T where lock(A) was called and
-	 * lock(B) was called before unlock(A) was called.
-	 */
-	if (!read_edges_map(efd, g, edge_map)) {
-		return false;
-	}
-
-	nr_mutex = g.nodes().size();
-	if (nr_mutex <= 0)
-		return false;
-
-	nr_edge = edge_map.size();
-
-	if (env.verbose) {
-		printf("Mutexes: %d, Edges: %d\n", nr_mutex, nr_edge);
-		for (const auto& c: parent_map) {
-			printf("[%d's parent] pid: %d, stack_id: 0x%llx, name: %s\n",
-			       c.first, c.second.parent_pid, c.second.stack_id, c.second.comm);
-		}
-	}
-
 	if (cycles(g) > 0) {
 		auto h  = graph2dag(g);
 		auto s  = serialize(h);
@@ -491,6 +457,49 @@ static bool print_map(const struct syms *syms, struct deadlock_bpf *obj)
 	}
 
 	return false;
+}
+
+static bool inspect_cycle(const struct syms *syms, struct deadlock_bpf *obj)
+{
+	int efd, tfd, sfd;
+	int nr_mutex = 0;
+	int nr_edge = 0;
+	digraph<__u64, int> g;
+	std::map<int, struct edges_leaf_t> edge_map;
+	std::map<__u32, struct thread_created_leaf_t> parent_map;
+
+	tfd = bpf_map__fd(obj->maps.thread_to_parent);
+	efd = bpf_map__fd(obj->maps.edges);
+	sfd = bpf_map__fd(obj->maps.stack_traces);
+
+	/* Map of child thread id -> parent info */
+	if (!read_threads_map(tfd, parent_map)) {
+		return false;
+	}
+
+	/* Mutex wait directed graph. Nodes are mutexes. Edge (A,B) exists
+	 * if there exists some thread T where lock(A) was called and
+	 * lock(B) was called before unlock(A) was called.
+	 */
+	if (!create_dep_graph(efd, edge_map, g)) {
+		return false;
+	}
+
+	nr_mutex = g.nodes().size();
+	if (nr_mutex <= 0)
+		return false;
+
+	nr_edge = edge_map.size();
+
+	if (env.verbose) {
+		printf("Mutexes: %d, Edges: %d\n", nr_mutex, nr_edge);
+		for (const auto& c: parent_map) {
+			printf("[%d's parent] tid: %d, stack_id: 0x%llx, name: %s\n",
+			       c.first, c.second.parent_tid, c.second.stack_id, c.second.comm);
+		}
+	}
+
+	return print_cycles(g, syms, edge_map, parent_map);
 }
 
 static int get_libpthread_path(char *path)
@@ -513,6 +522,7 @@ static int get_libpthread_path(char *path)
 	while (fscanf(f, "%*x-%*x %*s %*s %*s %*s %[^\n]\n", buf) != EOF) {
 		if (strchr(buf, '/') != buf)
 			continue;
+
 		filename = strrchr(buf, '/') + 1;
 		if (sscanf(filename, "libpthread-%f.so", &version) == 1) {
 			memcpy(path, buf, strlen(buf));
@@ -525,20 +535,13 @@ static int get_libpthread_path(char *path)
 	return -1;
 }
 
-static int attach_uprobes(struct deadlock_bpf *obj, struct bpf_link *links[])
+static int attach_uprobes(const struct bpf_program *prog, struct bpf_link *links[],
+			  char *symbols, int idx)
 {
 	char libpthread_path[PATH_MAX] = {};
 	off_t func_off;
 	char *symbol;
-	int idx = 0;
 	int err;
-
-	obj->links.dummy_clone = bpf_program__attach(obj->progs.dummy_clone);
-	if (!obj->links.dummy_clone) {
-		err = -errno;
-		warn("failed to attach kprobe clone: %d\n", err);
-		return -1;
-	}
 
 	err = get_libpthread_path(libpthread_path);
 	if (err) {
@@ -546,7 +549,7 @@ static int attach_uprobes(struct deadlock_bpf *obj, struct bpf_link *links[])
 		return -1;
 	}
 
-	symbol = strtok(env.unlock_symbols, ",");
+	symbol = strtok(symbols, ",");
 	while (symbol) {
 		if (idx >= MAX_LINKS) {
 			fprintf(stderr, "the number of probe is too big, please "
@@ -559,38 +562,40 @@ static int attach_uprobes(struct deadlock_bpf *obj, struct bpf_link *links[])
 			warn("could not find %s in %s\n", symbol, libpthread_path);
 			return -1;
 		}
-		links[idx] = bpf_program__attach_uprobe(obj->progs.dummy_mutex_unlock, false,
-						      env.pid ?: -1, libpthread_path, func_off);
-		if (!links[idx]) {
-			warn("failed to attach %s: %d\n", symbol, -errno);
-			return -1;
-		}
+		links[idx] = bpf_program__attach_uprobe(prog, false,
+							env.pid ?: -1, libpthread_path, func_off);
+		if (!links[idx])
+			return -errno;
+
 
 		idx++;
 		symbol = strtok(NULL, ",");
 	}
 
-	symbol = strtok(env.lock_symbols, ",");
-	while (symbol) {
-		if (idx >= MAX_LINKS) {
-			fprintf(stderr, "the number of probe is too big, please "
-				"increase MAX_LINKS's value and recompile");
-			return -1;
-		}
+	return idx;
+}
 
-		func_off = get_elf_func_offset(libpthread_path, symbol);
-		if (func_off < 0) {
-			warn("could not find %s in %s\n", symbol, libpthread_path);
-			return -1;
-		}
-		links[idx] = bpf_program__attach_uprobe(obj->progs.dummy_mutex_lock, false,
-						      env.pid ?: -1, libpthread_path, func_off);
-		if (!links[idx]) {
-			warn("failed to attach %s: %d\n", symbol, -errno);
-			return -1;
-		}
-		idx++;
-		symbol = strtok(NULL, ",");
+static int attach_probes(struct deadlock_bpf *obj, struct bpf_link *links[])
+{
+	int idx = 0;
+	int ret;
+
+	obj->links.clone_exit = bpf_program__attach(obj->progs.clone_exit);
+	if (!obj->links.clone_exit) {
+		warn("failed to attach kprobe clone: %s\n", strerror(errno));
+		return -1;
+	}
+
+	ret = attach_uprobes(obj->progs.mutex_unlock, links, env.unlock_symbols, idx);
+	if (ret < 0) {
+		warn("failed to attach %s: %d\n", env.unlock_symbols, ret);
+		return ret;
+	}
+
+	ret = attach_uprobes(obj->progs.mutex_lock, links, env.lock_symbols, ret);
+	if (ret < 0) {
+		warn("failed to attach %s: %d\n", env.lock_symbols, ret);
+		return ret;
 	}
 
 	return 0;
@@ -604,12 +609,12 @@ int main(int argc, char **argv)
 		.args_doc = NULL,
 		.doc = argp_program_doc,
 	};
-	struct syms_cache *syms_cache = NULL;
-	const struct syms *syms = NULL;
 	struct bpf_link *links[MAX_LINKS] = {};
 	struct deadlock_bpf *obj;
+	struct syms_cache *syms_cache = NULL;
+	const struct syms *syms = NULL;
 	int err, i;
-	bool cycle = false;
+	bool has_cycle = false;
 
 	err = argp_parse(&argp, argc, argv, 0, NULL, NULL);
 	if (err)
@@ -623,12 +628,8 @@ int main(int argc, char **argv)
 		return 1;
 	}
 
-	/* initialize global data (filtering options) */
-	obj->rodata->targ_pid = env.pid;
-
 	bpf_map__set_value_size(obj->maps.stack_traces,
 				env.perf_max_stack_depth * sizeof(unsigned long));
-
 	bpf_map__set_max_entries(obj->maps.stack_traces, env.stack_storage_size);
 	bpf_map__set_max_entries(obj->maps.thread_to_held_mutexes, env.threads);
 	bpf_map__set_max_entries(obj->maps.edges, env.edges);
@@ -639,7 +640,7 @@ int main(int argc, char **argv)
 		goto cleanup;
 	}
 
-	err = attach_uprobes(obj, links);
+	err = attach_probes(obj, links);
 	if (err)
 		goto cleanup;
 
@@ -657,9 +658,9 @@ int main(int argc, char **argv)
 	while (1) {
 		sleep(env.interval);
 
-		cycle = print_map(syms, obj);
+		has_cycle = inspect_cycle(syms, obj);
 
-		if (exiting || cycle)
+		if (exiting || has_cycle)
 			break;
 	}
 

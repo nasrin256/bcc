@@ -1,12 +1,15 @@
-/* SPDX-License-Identifier: BSD-2-Clause */
-/* Copyright (c) 2022 LG Electronics */
+// SPDX-License-Identifier: (LGPL-2.1 OR BSD-2-Clause)
+/*
+ * Copyright 2022 LG Electronics Inc.
+ *
+ * Based on deadlock from BCC by Kenny Yu.
+ * 01-Jul-2022   Eunseon Lee   Created this.
+ */
 #include <vmlinux.h>
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
 #include "deadlock.h"
 #include "maps.bpf.h"
-
-const volatile pid_t targ_pid = -1;
 
 /* Map of thread ID -> array of (mutex addresses, stack id) */
 struct {
@@ -22,12 +25,12 @@ struct {
 	__type(value, struct edges_leaf_t);
 } edges SEC(".maps");
 
-/* Map of child thread pid -> info about parent thread. */
+/* Map of child thread tid -> info about parent thread. */
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
 	__type(key, u32);
 	__type(value, struct thread_created_leaf_t);
-	__uint(max_entries, 10240); /* default size */
+	__uint(max_entries, MAX_ENTRIES);
 } thread_to_parent SEC(".maps");
 
 /* Stack traces when threads are created and when mutexes are locked/unlocked. */
@@ -45,23 +48,24 @@ struct {
  * mutexes_held[T].add(M)
  */
 SEC("uprobe/dummy_mutex_lock")
-int BPF_KPROBE(dummy_mutex_lock, void *mutex)
+int BPF_KPROBE(mutex_lock, void *mutex)
 {
-	/* Higher 32 bits is process ID, Lower 32 bits is thread ID */
-	u32 pid = bpf_get_current_pid_tgid();
+	u32 tid = bpf_get_current_pid_tgid();
 	u64 stack_id;
 	int added_mutex;
-	char name[16];
+	char name[TASK_COMM_LEN];
+	struct thread_to_held_mutex_leaf_t empty_leaf = {};
+	struct thread_to_held_mutex_leaf_t *leaf;
+	int result;
+	int i;
 
 	bpf_get_current_comm(&name, sizeof(name));
 
-	struct thread_to_held_mutex_leaf_t empty_leaf = {};
-	struct thread_to_held_mutex_leaf_t *leaf =
-		bpf_map_lookup_or_try_init(&thread_to_held_mutexes, &pid, &empty_leaf);
+	leaf = bpf_map_lookup_or_try_init(&thread_to_held_mutexes, &tid, &empty_leaf);
 	if (!leaf) {
 		bpf_printk("could not add thread_to_held_mutex key, thread: %d, mutex: %p\n",
-			   pid, mutex);
-		return 1; /* Could not insert, no more memory */
+			   tid, mutex);
+		return 1;
 	}
 
 	/*
@@ -70,8 +74,7 @@ int BPF_KPROBE(dummy_mutex_lock, void *mutex)
 	 * reports, disallow self edges. Do one pass to check if we are already
 	 * holding the mutex, and if we are, do nothing.
 	 */
-	#pragma unroll
-	for (int i = 0; i < MAX_HELD_MUTEXES; ++i) {
+	for (i = 0; i < MAX_HELD_MUTEXES; ++i) {
 		if (leaf->held_mutexes[i].mutex == mutex) {
 			return 1; /* Disallow self edges */
 		}
@@ -80,8 +83,7 @@ int BPF_KPROBE(dummy_mutex_lock, void *mutex)
 	stack_id = bpf_get_stackid(ctx, &stack_traces, BPF_F_USER_STACK);
 
 	added_mutex = 0;
-	#pragma unroll
-	for (int i = 0; i < MAX_HELD_MUTEXES; ++i) {
+	for (i = 0; i < MAX_HELD_MUTEXES; ++i) {
 		/* If this is a free slot, see if we can insert. */
 		if (!leaf->held_mutexes[i].mutex) {
 			if (!added_mutex) {
@@ -100,15 +102,15 @@ int BPF_KPROBE(dummy_mutex_lock, void *mutex)
 		struct edges_leaf_t edge_leaf = {};
 		edge_leaf.mutex1_stack_id = leaf->held_mutexes[i].stack_id;
 		edge_leaf.mutex2_stack_id = stack_id;
-		edge_leaf.thread_pid = pid;
+		edge_leaf.tid = tid;
 		bpf_get_current_comm(&edge_leaf.comm, sizeof(edge_leaf.comm));
 
 		/* Returns non-zero on error */
-		int result = bpf_map_update_elem(&edges, &edge_key, &edge_leaf, BPF_ANY);
+		result = bpf_map_update_elem(&edges, &edge_key, &edge_leaf, BPF_ANY);
 		if (result) {
 			bpf_printk("could not add edge key %p, %p, error: %d\n",
 				   edge_key.mutex1, edge_key.mutex2, result);
-			continue; /* Could not insert, no more memory */
+			continue;
 		}
 	}
 
@@ -129,20 +131,21 @@ int BPF_KPROBE(dummy_mutex_lock, void *mutex)
  * mutexes_held[T].remove(M)
  */
 SEC("kprobe/dummy_mutex_unlock")
-int BPF_KPROBE(dummy_mutex_unlock, void *mutex)
+int BPF_KPROBE(mutex_unlock, void *mutex)
 {
-	/* Higher 32 bits is process ID, Lower 32 bits is thread ID */
-	u32 pid = bpf_get_current_pid_tgid();
-
 	struct thread_to_held_mutex_leaf_t *leaf;
-	leaf = bpf_map_lookup_elem(&thread_to_held_mutexes, &pid);
+	struct thread_to_held_mutex_leaf_t value = {};
+	u32 tid = bpf_get_current_pid_tgid();
+	int i;
+
+	leaf = bpf_map_lookup_elem(&thread_to_held_mutexes, &tid);
 	if (!leaf) {
 		/*
-		 * If the leaf does not exist for the pid, then it means we either missed
+		 * If the leaf does not exist for the tid, then it means we either missed
 		 * the acquire event, or we had no more memory and could not add it.
 		 */
 		bpf_printk("could not find thread_to_held_mutex, thread: %d, mutex: %p\n",
-			   pid, mutex);
+			   tid, mutex);
 		return 1;
 	}
 
@@ -152,11 +155,9 @@ int BPF_KPROBE(dummy_mutex_unlock, void *mutex)
 	 * invalid memory access on `leaf->held_mutexes[i]` below. On newer kernels,
 	 * we can avoid making this extra copy in `value` and use `leaf` directly.
 	 */
-	struct thread_to_held_mutex_leaf_t value = {};
 	bpf_probe_read_user(&value, sizeof(struct thread_to_held_mutex_leaf_t), leaf);
 
-	#pragma unroll
-	for (int i = 0; i < MAX_HELD_MUTEXES; ++i) {
+	for (i = 0; i < MAX_HELD_MUTEXES; ++i) {
 		/*
 		 * Find the current mutex (if it exists), and clear it.
 		 * Note: Can't use `leaf->` in this if condition, see comment above.
@@ -172,27 +173,30 @@ int BPF_KPROBE(dummy_mutex_unlock, void *mutex)
 
 /* Trace return from clone() syscall in the child thread (return value > 0). */
 SEC("tracepoint/syscalls/sys_exit_clone")
-int dummy_clone(struct trace_event_raw_sys_exit *ctx)
+int clone_exit(struct trace_event_raw_sys_exit *ctx)
 {
-	u32 child_pid = (u32)ctx->ret;
-	if (child_pid <= 0) {
+	struct thread_created_leaf_t thread_created_leaf = {};
+	struct thread_created_leaf_t *insert_result;
+
+	u32 child_tid = (u32)ctx->ret;
+	if (child_tid <= 0) {
 		return 1;
 	}
 
-	struct thread_created_leaf_t thread_created_leaf = {};
-	thread_created_leaf.parent_pid = bpf_get_current_pid_tgid();
+	thread_created_leaf.parent_tid = bpf_get_current_pid_tgid();
 	thread_created_leaf.stack_id =
 		bpf_get_stackid(ctx, &stack_traces, BPF_F_USER_STACK);
 	bpf_get_current_comm(&thread_created_leaf.comm,
 			     sizeof(thread_created_leaf.comm));
 
-	struct thread_created_leaf_t *insert_result =
-		bpf_map_lookup_or_try_init(&thread_to_parent, &child_pid, &thread_created_leaf);
+	insert_result = bpf_map_lookup_or_try_init(&thread_to_parent, &child_tid,
+						   &thread_created_leaf);
 	if (!insert_result) {
-		bpf_printk("could not add thread_created_key, child: %d, parent: %d\n", child_pid,
-			   thread_created_leaf.parent_pid);
-		return 1; /* Could not insert, no more memory */
+		bpf_printk("could not add thread_created_key, child: %d, parent: %d\n", child_tid,
+			   thread_created_leaf.parent_tid);
+		return 1;
 	}
+
 	return 0;
 }
 char LICENSE[] SEC("license") = "GPL";
