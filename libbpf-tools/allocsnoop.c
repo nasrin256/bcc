@@ -43,7 +43,6 @@ static struct env {
 	int perf_max_stack_depth;
 	int stack_map_max_entries;
 	long page_size;
-	bool kernel_trace;
 	bool verbose;
 	char symbols_prefix[16];
 } env = {
@@ -63,7 +62,6 @@ static struct env {
 	.perf_max_stack_depth = 127,
 	.stack_map_max_entries = 10240,
 	.page_size = 1,
-	.kernel_trace = false,
 	.verbose = false,
 	.symbols_prefix = {0},
 };
@@ -118,13 +116,6 @@ static error_t argp_parse_arg(int key, char *arg, struct argp_state *state);
 
 static int libbpf_print_fn(enum libbpf_print_level level, const char *format, va_list args);
 
-#ifdef KERNEL_ALLOC
-static bool has_kernel_node_tracepoints();
-static void disable_kernel_node_tracepoints(struct allocsnoop_bpf *skel);
-static void disable_kernel_percpu_tracepoints(struct allocsnoop_bpf *skel);
-static void disable_kernel_tracepoints(struct allocsnoop_bpf *skel);
-#endif
-
 static int attach_uprobes(struct allocsnoop_bpf *skel);
 
 const char *argp_program_version = "allocsnoop 0.1";
@@ -134,7 +125,7 @@ const char *argp_program_bug_address =
 const char argp_args_doc[] =
 "Trace outstanding memory allocations\n"
 "\n"
-"USAGE: allocsnoop [-h] [-c COMMAND] [-p PID] [-t] [-n] [-a] [-o AGE_MS] [-C] [-F] [-s SAMPLE_RATE] [-T TOP_STACKS] [-z MIN_SIZE] [-Z MAX_SIZE] [-O OBJECT] [-P] [INTERVAL] [INTERVALS]\n"
+"USAGE: allocsnoop [-h] [-c COMMAND] [-p PID] [-t] [-n] [-a] [-o AGE_MS] [-F] [-s SAMPLE_RATE] [-T TOP_STACKS] [-z MIN_SIZE] [-Z MAX_SIZE] [-O OBJECT] [-P] [INTERVAL] [INTERVALS]\n"
 "\n"
 "EXAMPLES:\n"
 "./allocsnoop -p $(pidof allocs)\n"
@@ -166,7 +157,6 @@ static const struct argp_option argp_options[] = {
 	{"show-allocs", 'a', 0, 0, "show allocation addresses and sizes as well as call stacks", 0 },
 	{"older", 'o', "AGE_MS", 0, "prune allocations younger than this age in milliseconds", 0 },
 	{"command", 'c', "COMMAND", 0, "execute and trace the specified command", 0 },
-	{"combined-only", 'C', 0, 0, "show combined allocation statistics only", 0 },
 	{"wa-missing-free", 'F', 0, 0, "workaround to alleviate misjudgments when free is missing", 0 },
 	{"sample-rate", 's', "SAMPLE_RATE", 0, "sample every N-th allocation to decrease the overhead", 0 },
 	{"top", 'T', "TOP_STACKS", 0, "display only this many top allocating stacks (by size)", 0 },
@@ -187,7 +177,6 @@ static struct sigaction sig_action = {
 };
 
 struct syms_cache *syms_cache;
-struct ksyms *ksyms;
 
 static uint64_t *stack;
 
@@ -294,7 +283,7 @@ int main(int argc, char *argv[])
 	}
 
 	skel->rodata->trace_all = env.trace_all;
-	skel->rodata->stack_flags = env.kernel_trace ? 0 : BPF_F_USER_STACK;
+	skel->rodata->stack_flags = BPF_F_USER_STACK;
 	skel->rodata->min_size = env.min_size;
 	skel->rodata->max_size = env.max_size;
 	skel->rodata->page_size = env.page_size;
@@ -305,19 +294,6 @@ int main(int argc, char *argv[])
 				env.perf_max_stack_depth * sizeof(unsigned long));
 	bpf_map__set_max_entries(skel->maps.stack_traces, env.stack_map_max_entries);
 
-#ifdef KERNEL_ALLOC
-	// disable kernel tracepoints based on settings or availability
-	if (env.kernel_trace) {
-		if (!has_kernel_node_tracepoints())
-			disable_kernel_node_tracepoints(skel);
-
-		if (!env.percpu)
-			disable_kernel_percpu_tracepoints(skel);
-	} else {
-		disable_kernel_tracepoints(skel);
-	}
-#endif
-
 	ret = allocsnoop_bpf__load(skel);
 	if (ret) {
 		fprintf(stderr, "failed to load bpf object\n");
@@ -325,14 +301,11 @@ int main(int argc, char *argv[])
 		goto cleanup;
 	}
 
-	// if userspace oriented, attach upbrobes
-	if (!env.kernel_trace) {
-		ret = attach_uprobes(skel);
-		if (ret) {
-			fprintf(stderr, "failed to attach uprobes\n");
+	ret = attach_uprobes(skel);
+	if (ret) {
+		fprintf(stderr, "failed to attach uprobes\n");
 
-			goto cleanup;
-		}
+		goto cleanup;
 	}
 
 	ret = allocsnoop_bpf__attach(skel);
@@ -355,22 +328,12 @@ int main(int argc, char *argv[])
 	}
 #endif
 
-	if (env.kernel_trace) {
-		ksyms = ksyms__load();
-		if (!ksyms) {
-			fprintf(stderr, "Failed to load ksyms\n");
-			ret = -ENOMEM;
+	syms_cache = syms_cache__new(0);
+	if (!syms_cache) {
+		fprintf(stderr, "Failed to create syms_cache\n");
+		ret = -ENOMEM;
 
-			goto cleanup;
-		}
-	} else {
-		syms_cache = syms_cache__new(0);
-		if (!syms_cache) {
-			fprintf(stderr, "Failed to create syms_cache\n");
-			ret = -ENOMEM;
-
-			goto cleanup;
-		}
+		goto cleanup;
 	}
 
 	init_outfile(&f_alloc, FILENAME_ALLOCS, &json_wtr_alloc);
@@ -421,8 +384,6 @@ int main(int argc, char *argv[])
 cleanup:
 	if (syms_cache)
 		syms_cache__free(syms_cache);
-	if (ksyms)
-		ksyms__free(ksyms);
 
 	allocsnoop_bpf__destroy(skel);
 
@@ -470,9 +431,6 @@ error_t argp_parse_arg(int key, char *arg, struct argp_state *state)
 #if 0
 	case 'c':
 		strncpy(env.command, arg, sizeof(env.command) - 1);
-		break;
-	case 'C':
-		env.combined_only = true;
 		break;
 #endif
 	case 'F':
@@ -634,7 +592,6 @@ static void json_add_stacktrace(int stack_id, u64 *ip, pid_t pid)
 	jsonw_name(w, "callchain");
 	jsonw_start_array(w);
 
-	//
 	print_stack(w, pid);
 
 	jsonw_end_array(w);
@@ -698,40 +655,6 @@ static int deinit_outfile(FILE *f, json_writer_t *json_wtr)
 	return 0;
 }
 
-#ifdef KERNEL_ALLOC
-bool has_kernel_node_tracepoints()
-{
-	return tracepoint_exists("kmem", "kmalloc_node") &&
-		tracepoint_exists("kmem", "kmem_cache_alloc_node");
-}
-
-void disable_kernel_node_tracepoints(struct allocsnoop_bpf *skel)
-{
-	bpf_program__set_autoload(skel->progs.allocsnoop__kmalloc_node, false);
-	bpf_program__set_autoload(skel->progs.allocsnoop__kmem_cache_alloc_node, false);
-}
-
-void disable_kernel_percpu_tracepoints(struct allocsnoop_bpf *skel)
-{
-	bpf_program__set_autoload(skel->progs.allocsnoop__percpu_alloc_percpu, false);
-	bpf_program__set_autoload(skel->progs.allocsnoop__percpu_free_percpu, false);
-}
-
-void disable_kernel_tracepoints(struct allocsnoop_bpf *skel)
-{
-	bpf_program__set_autoload(skel->progs.allocsnoop__kmalloc, false);
-	bpf_program__set_autoload(skel->progs.allocsnoop__kmalloc_node, false);
-	bpf_program__set_autoload(skel->progs.allocsnoop__kfree, false);
-	bpf_program__set_autoload(skel->progs.allocsnoop__kmem_cache_alloc, false);
-	bpf_program__set_autoload(skel->progs.allocsnoop__kmem_cache_alloc_node, false);
-	bpf_program__set_autoload(skel->progs.allocsnoop__kmem_cache_free, false);
-	bpf_program__set_autoload(skel->progs.allocsnoop__mm_page_alloc, false);
-	bpf_program__set_autoload(skel->progs.allocsnoop__mm_page_free, false);
-	bpf_program__set_autoload(skel->progs.allocsnoop__percpu_alloc_percpu, false);
-	bpf_program__set_autoload(skel->progs.allocsnoop__percpu_free_percpu, false);
-}
-#endif
-
 int attach_uprobes(struct allocsnoop_bpf *skel)
 {
 	ATTACH_UPROBE_CHECKED(skel, malloc, malloc_enter);
@@ -777,7 +700,6 @@ int attach_uprobes(struct allocsnoop_bpf *skel)
 	// added in C11
 	ATTACH_UPROBE(skel, aligned_alloc, aligned_alloc_enter);
 	ATTACH_URETPROBE(skel, aligned_alloc, aligned_alloc_exit);
-
 
 	return 0;
 }

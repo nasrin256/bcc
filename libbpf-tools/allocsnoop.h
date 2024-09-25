@@ -16,6 +16,4 @@ struct dealloc_info {
 	__u64 pid;
 };
 
-//#define KERNEL_ALLOC
-
 #endif /* __ALLOCSNOOP_H */
