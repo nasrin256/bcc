@@ -58,12 +58,13 @@ struct {
 
 static bool allow_record(struct task_struct *t)
 {
-	u32 tgid = t->tgid;
 	u32 pid = t->pid;
+	u32 tgid = t->tgid;
+	bool pid_allowed = filter_by_pid && bpf_map_lookup_elem(&pids, &pid);
+	bool tgid_allowed = filter_by_tgid && bpf_map_lookup_elem(&tgids, &tgid);
+	bool no_filter = !filter_by_tgid && !filter_by_pid;
 
-	if (filter_by_tgid && !bpf_map_lookup_elem(&tgids, &tgid))
-		return false;
-	if (filter_by_pid && !bpf_map_lookup_elem(&pids, &pid))
+	if (!(pid_allowed || tgid_allowed || no_filter))
 		return false;
 	if (user_threads_only && t->flags & PF_KTHREAD)
 		return false;
