@@ -38,10 +38,14 @@ Location::Location(uint64_t addr, const std::string &bin_path, const char *arg_f
 
 #ifdef __aarch64__
   ArgumentParser_aarch64 parser(arg_fmt);
+#elif __loongarch64
+  ArgumentParser_loongarch64 parser(arg_fmt);
 #elif __powerpc64__
   ArgumentParser_powerpc64 parser(arg_fmt);
 #elif __s390x__
   ArgumentParser_s390x parser(arg_fmt);
+#elif __riscv
+  ArgumentParser_riscv64 parser(arg_fmt);
 #else
   ArgumentParser_x64 parser(arg_fmt);
 #endif
@@ -149,7 +153,7 @@ bool Probe::disable() {
   return true;
 }
 
-std::string Probe::largest_arg_type(size_t arg_n) {
+const char *Probe::largest_arg_type(size_t arg_n) {
   Argument *largest = nullptr;
   for (Location &location : locations_) {
     Argument *candidate = &location.arguments_[arg_n];
@@ -159,7 +163,7 @@ std::string Probe::largest_arg_type(size_t arg_n) {
   }
 
   assert(largest);
-  return largest->ctype();
+  return largest->ctype_name();
 }
 
 bool Probe::usdt_getarg(std::ostream &stream) {
@@ -174,6 +178,11 @@ bool Probe::usdt_getarg(std::ostream &stream, const std::string& probe_func) {
 
   if (arg_count == 0)
     return true;
+
+  uint64_t page_size = sysconf(_SC_PAGESIZE);
+  std::unordered_set<int> page_offsets;
+  for (Location &location : locations_)
+    page_offsets.insert(location.address_ % page_size);
 
   for (size_t arg_n = 0; arg_n < arg_count; ++arg_n) {
     std::string ctype = largest_arg_type(arg_n);
@@ -193,15 +202,22 @@ bool Probe::usdt_getarg(std::ostream &stream, const std::string& probe_func) {
         return false;
       stream << "\n  return 0;\n}\n";
     } else {
-      stream << "  switch(PT_REGS_IP(ctx)) {\n";
+      if (page_offsets.size() == locations_.size())
+        tfm::format(stream, "  switch (PT_REGS_IP(ctx) %% 0x%xULL) {\n", page_size);
+      else
+        stream << "  switch (PT_REGS_IP(ctx)) {\n";
       for (Location &location : locations_) {
-        uint64_t global_address;
+        if (page_offsets.size() == locations_.size()) {
+          tfm::format(stream, "  case 0x%xULL: ", location.address_ % page_size);
+        } else {
+          uint64_t global_address;
 
-        if (!resolve_global_address(&global_address, location.bin_path_,
-                                    location.address_))
-          return false;
+          if (!resolve_global_address(&global_address, location.bin_path_,
+                                      location.address_))
+            return false;
 
-        tfm::format(stream, "  case 0x%xULL: ", global_address);
+          tfm::format(stream, "  case 0x%xULL: ", global_address);
+        }
         if (!location.arguments_[arg_n].assign_to_local(stream, cptr, location.bin_path_,
                                                         pid_))
           return false;
@@ -544,7 +560,7 @@ const char *bcc_usdt_get_probe_argctype(
 ) {
   USDT::Probe *p = static_cast<USDT::Context *>(ctx)->get(probe_name);
   if (p)
-    return p->get_arg_ctype(arg_index).c_str();
+    return p->get_arg_ctype_name(arg_index);
   return "";
 }
 
@@ -553,7 +569,7 @@ const char *bcc_usdt_get_fully_specified_probe_argctype(
 ) {
   USDT::Probe *p = static_cast<USDT::Context *>(ctx)->get(provider_name, probe_name);
   if (p)
-    return p->get_arg_ctype(arg_index).c_str();
+    return p->get_arg_ctype_name(arg_index);
   return "";
 }
 

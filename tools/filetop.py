@@ -1,4 +1,4 @@
-#!/usr/bin/python
+#!/usr/bin/env python
 # @lint-avoid-python-3-compatibility-imports
 #
 # filetop  file reads and writes by process.
@@ -67,6 +67,7 @@ bpf_text = """
 struct info_t {
     unsigned long inode;
     dev_t dev;
+    dev_t rdev;
     u32 pid;
     u32 name_len;
     char comm[TASK_COMM_LEN];
@@ -105,7 +106,8 @@ static int do_entry(struct pt_regs *ctx, struct file *file,
     struct info_t info = {
         .pid = pid,
         .inode = file->f_inode->i_ino,
-        .dev = file->f_inode->i_rdev,
+        .dev = file->f_inode->i_sb->s_dev,
+        .rdev = file->f_inode->i_rdev,
     };
     bpf_get_current_comm(&info.comm, sizeof(info.comm));
     info.name_len = d_name.len;
@@ -165,6 +167,10 @@ b = BPF(text=bpf_text)
 b.attach_kprobe(event="vfs_read", fn_name="trace_read_entry")
 b.attach_kprobe(event="vfs_write", fn_name="trace_write_entry")
 
+# check whether hash table batch ops is supported
+htab_batch_ops = True if BPF.kernel_struct_has_field(b'bpf_map_ops',
+        b'map_lookup_and_delete_batch') == 1 else False
+
 DNAME_INLINE_LEN = 32  # linux/dcache.h
 
 print('Tracing... Output every %d secs. Hit Ctrl-C to end' % interval)
@@ -196,7 +202,8 @@ while 1:
     # by-TID output
     counts = b.get_table("counts")
     line = 0
-    for k, v in reversed(sorted(counts.items(),
+    for k, v in reversed(sorted(counts.items_lookup_and_delete_batch()
+                                if htab_batch_ops else counts.items(),
                                 key=sort_fn)):
         name = k.name.decode('utf-8', 'replace')
         if k.name_len > DNAME_INLINE_LEN:
@@ -211,7 +218,9 @@ while 1:
         line += 1
         if line >= maxrows:
             break
-    counts.clear()
+
+    if not htab_batch_ops:
+        counts.clear()
 
     countdown -= 1
     if exiting or countdown == 0:

@@ -21,12 +21,12 @@
 #include "BPF.h"
 #include "catch.hpp"
 
-TEST_CASE("test bpf table", "[bpf_table]") {
+TEST_CASE("test bpf table", ebpf::bpf_module_rw_engine_enabled() ? "[bpf_table]" : "[bpf_table][!mayfail]") {
   const std::string BPF_PROGRAM = R"(
     BPF_TABLE("hash", int, int, myhash, 128);
   )";
 
-  ebpf::BPF *bpf(new ebpf::BPF);
+  auto bpf = std::make_unique<ebpf::BPF>();
   ebpf::StatusTuple res(0);
   std::vector<std::pair<std::string, std::string>> elements;
   res = bpf->init(BPF_PROGRAM);
@@ -79,7 +79,7 @@ TEST_CASE("test bpf table", "[bpf_table]") {
   REQUIRE(elements.size() == 0);
 
   // delete bpf_module, call to key/leaf printf/scanf must fail
-  delete bpf;
+  bpf.reset();
 
   res = t.update_value("0x07", "0x42");
   REQUIRE(!res.ok());
@@ -92,7 +92,7 @@ TEST_CASE("test bpf table", "[bpf_table]") {
 }
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 6, 0)
-TEST_CASE("test bpf percpu tables", "[bpf_percpu_table]") {
+TEST_CASE("test bpf percpu tables", ebpf::bpf_module_rw_engine_enabled() ? "[bpf_percpu_table]" : "[bpf_percpu_table][!mayfail]") {
   const std::string BPF_PROGRAM = R"(
     BPF_PERCPU_HASH(myhash, int, u64, 128);
   )";

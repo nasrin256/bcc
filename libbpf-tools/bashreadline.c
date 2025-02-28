@@ -12,6 +12,7 @@
 #include <bpf/bpf.h>
 #include "bashreadline.h"
 #include "bashreadline.skel.h"
+#include "btf_helpers.h"
 #include "trace_helpers.h"
 #include "uprobe_helpers.h"
 
@@ -89,6 +90,41 @@ static void handle_lost_events(void *ctx, int cpu, __u64 lost_cnt)
 	warn("lost %llu events on CPU #%d\n", lost_cnt, cpu);
 }
 
+static char *find_readline_function_name(const char *bash_path)
+{
+  bool found = false;
+  int fd = -1;
+  Elf *elf = NULL;
+  Elf_Scn *scn = NULL;
+  GElf_Shdr shdr;
+
+
+  elf = open_elf(bash_path, &fd);
+
+  while ((scn = elf_nextscn(elf, scn)) != NULL && !found) {
+    gelf_getshdr(scn, &shdr);
+    if (shdr.sh_type == SHT_SYMTAB || shdr.sh_type == SHT_DYNSYM) {
+      Elf_Data *data = elf_getdata(scn, NULL);
+      if (data != NULL) {
+        GElf_Sym *symtab = (GElf_Sym *) data->d_buf;
+        int sym_count = shdr.sh_size / shdr.sh_entsize;
+        for (int i = 0; i < sym_count; ++i) {
+          if(strcmp("readline_internal_teardown", elf_strptr(elf, shdr.sh_link, symtab[i].st_name)) == 0){
+            found = true;
+            break;
+          }
+        }
+    	}
+    }
+  }
+
+  close_elf(elf,fd);
+  if (found)
+    return "readline_internal_teardown";
+  else
+    return "readline";
+}
+
 static char *find_readline_so()
 {
 	const char *bash_path = "/bin/bash";
@@ -99,7 +135,7 @@ static char *find_readline_so()
 	char path[128];
 	char *result = NULL;
 
-	func_off = get_elf_func_offset(bash_path, "readline");
+	func_off = get_elf_func_offset(bash_path, find_readline_function_name(bash_path));
 	if (func_off >= 0)
 		return strdup(bash_path);
 
@@ -132,7 +168,7 @@ cleanup:
 	if (line)
 		free(line);
 	if (fp)
-		fclose(fp);
+		pclose(fp);
 	return result;
 }
 
@@ -143,6 +179,7 @@ static void sig_int(int signo)
 
 int main(int argc, char **argv)
 {
+	LIBBPF_OPTS(bpf_object_open_opts, open_opts);
 	static const struct argp argp = {
 		.options = opts,
 		.parser = parse_arg,
@@ -157,7 +194,6 @@ int main(int argc, char **argv)
 	err = argp_parse(&argp, argc, argv, 0, NULL, NULL);
 	if (err)
 		return err;
-
 	if (libreadline_path) {
 		readline_so_path = libreadline_path;
 	} else if ((readline_so_path = find_readline_so()) == NULL) {
@@ -165,16 +201,27 @@ int main(int argc, char **argv)
 		return 1;
 	}
 
-	libbpf_set_strict_mode(LIBBPF_STRICT_ALL);
 	libbpf_set_print(libbpf_print_fn);
 
-	obj = bashreadline_bpf__open_and_load();
-	if (!obj) {
-		warn("failed to open and load BPF object\n");
+	err = ensure_core_btf(&open_opts);
+	if (err) {
+		warn("failed to fetch necessary BTF for CO-RE: %s\n", strerror(-err));
 		goto cleanup;
 	}
 
-	func_off = get_elf_func_offset(readline_so_path, "readline");
+	obj = bashreadline_bpf__open_opts(&open_opts);
+	if (!obj) {
+		warn("failed to open BPF object\n");
+		goto cleanup;
+	}
+
+	err = bashreadline_bpf__load(obj);
+	if (err) {
+		warn("failed to load BPF object: %d\n", err);
+		goto cleanup;
+	}
+
+	func_off = get_elf_func_offset(readline_so_path, find_readline_function_name(readline_so_path));
 	if (func_off < 0) {
 		warn("cound not find readline in %s\n", readline_so_path);
 		goto cleanup;
@@ -217,6 +264,7 @@ cleanup:
 		free(readline_so_path);
 	perf_buffer__free(pb);
 	bashreadline_bpf__destroy(obj);
+	cleanup_core_btf(&open_opts);
 
 	return err != 0;
 }

@@ -8,15 +8,16 @@
 #include <sys/time.h>
 #include <time.h>
 #include <unistd.h>
+#include <fcntl.h>
 #include <bpf/libbpf.h>
 #include <bpf/bpf.h>
 #include "execsnoop.h"
 #include "execsnoop.skel.h"
+#include "btf_helpers.h"
 #include "trace_helpers.h"
 
 #define PERF_BUFFER_PAGES   64
 #define PERF_POLL_TIMEOUT_MS	100
-#define NSEC_PRECISION (NSEC_PER_SEC / 1000)
 #define MAX_ARGS_KEY 259
 
 static volatile sig_atomic_t exiting = 0;
@@ -32,6 +33,8 @@ static struct env {
 	bool print_uid;
 	bool verbose;
 	int max_args;
+	char *cgroupspath;
+	bool cg;
 } env = {
 	.max_args = DEFAULT_MAXARGS,
 	.uid = INVALID_UID
@@ -45,7 +48,7 @@ const char *argp_program_bug_address =
 const char argp_program_doc[] =
 "Trace exec syscalls\n"
 "\n"
-"USAGE: execsnoop [-h] [-T] [-t] [-x] [-u UID] [-q] [-n NAME] [-l LINE] [-U]\n"
+"USAGE: execsnoop [-h] [-T] [-t] [-x] [-u UID] [-q] [-n NAME] [-l LINE] [-U] [-c CG]\n"
 "                 [--max-args MAX_ARGS]\n"
 "\n"
 "EXAMPLES:\n"
@@ -57,7 +60,8 @@ const char argp_program_doc[] =
 "   ./execsnoop -t        # include timestamps\n"
 "   ./execsnoop -q        # add \"quotemarks\" around arguments\n"
 "   ./execsnoop -n main   # only print command lines containing \"main\"\n"
-"   ./execsnoop -l tpkg   # only print command where arguments contains \"tpkg\"";
+"   ./execsnoop -l tpkg   # only print command where arguments contains \"tpkg\""
+"   ./execsnoop -c CG     # Trace process under cgroupsPath CG\n";
 
 static const struct argp_option opts[] = {
 	{ "time", 'T', NULL, 0, "include time column on output (HH:MM:SS)" },
@@ -71,6 +75,7 @@ static const struct argp_option opts[] = {
 	{ "max-args", MAX_ARGS_KEY, "MAX_ARGS", 0,
 		"maximum number of arguments parsed and displayed, defaults to 20" },
 	{ "verbose", 'v', NULL, 0, "Verbose debug output" },
+	{ "cgroup", 'c', "/sys/fs/cgroup/unified", 0, "Trace process in cgroup path"},
 	{ NULL, 'h', NULL, OPTION_HIDDEN, "Show the full help" },
 	{},
 };
@@ -91,6 +96,10 @@ static error_t parse_arg(int key, char *arg, struct argp_state *state)
 		break;
 	case 'x':
 		env.fails = true;
+		break;
+	case 'c':
+		env.cgroupspath = arg;
+		env.cg = true;
 		break;
 	case 'u':
 		errno = 0;
@@ -258,6 +267,7 @@ static void handle_lost_events(void *ctx, int cpu, __u64 lost_cnt)
 
 int main(int argc, char **argv)
 {
+	LIBBPF_OPTS(bpf_object_open_opts, open_opts);
 	static const struct argp argp = {
 		.options = opts,
 		.parser = parse_arg,
@@ -266,15 +276,22 @@ int main(int argc, char **argv)
 	struct perf_buffer *pb = NULL;
 	struct execsnoop_bpf *obj;
 	int err;
+	int idx, cg_map_fd;
+	int cgfd = -1;
 
 	err = argp_parse(&argp, argc, argv, 0, NULL, NULL);
 	if (err)
 		return err;
 
-	libbpf_set_strict_mode(LIBBPF_STRICT_ALL);
 	libbpf_set_print(libbpf_print_fn);
 
-	obj = execsnoop_bpf__open();
+	err = ensure_core_btf(&open_opts);
+	if (err) {
+		fprintf(stderr, "failed to fetch necessary BTF for CO-RE: %s\n", strerror(-err));
+		return 1;
+	}
+
+	obj = execsnoop_bpf__open_opts(&open_opts);
 	if (!obj) {
 		fprintf(stderr, "failed to open BPF object\n");
 		return 1;
@@ -284,11 +301,27 @@ int main(int argc, char **argv)
 	obj->rodata->ignore_failed = !env.fails;
 	obj->rodata->targ_uid = env.uid;
 	obj->rodata->max_args = env.max_args;
+	obj->rodata->filter_cg = env.cg;
 
 	err = execsnoop_bpf__load(obj);
 	if (err) {
 		fprintf(stderr, "failed to load BPF object: %d\n", err);
 		goto cleanup;
+	}
+
+	/* update cgroup path fd to map */
+	if (env.cg) {
+		idx = 0;
+		cg_map_fd = bpf_map__fd(obj->maps.cgroup_map);
+		cgfd = open(env.cgroupspath, O_RDONLY);
+		if (cgfd < 0) {
+			fprintf(stderr, "Failed opening Cgroup path: %s", env.cgroupspath);
+			goto cleanup;
+		}
+		if (bpf_map_update_elem(cg_map_fd, &idx, &cgfd, BPF_ANY)) {
+			fprintf(stderr, "Failed adding target cgroup to map");
+			goto cleanup;
+		}
 	}
 
 	clock_gettime(CLOCK_MONOTONIC, &start_time);
@@ -339,6 +372,9 @@ int main(int argc, char **argv)
 cleanup:
 	perf_buffer__free(pb);
 	execsnoop_bpf__destroy(obj);
+	cleanup_core_btf(&open_opts);
+	if (cgfd > 0)
+		close(cgfd);
 
 	return err != 0;
 }

@@ -37,6 +37,10 @@ void * bpf_module_create_c_from_string(const char *text, unsigned flags, const c
   return mod;
 }
 
+bool bpf_module_rw_engine_enabled() {
+  return ebpf::bpf_module_rw_engine_enabled();
+}
+
 void bpf_module_destroy(void *program) {
   auto mod = static_cast<ebpf::BPFModule *>(program);
   if (!mod) return;
@@ -232,12 +236,12 @@ int bcc_func_load(void *program, int prog_type, const char *name,
                   const struct bpf_insn *insns, int prog_len,
                   const char *license, unsigned kern_version,
                   int log_level, char *log_buf, unsigned log_buf_size,
-                  const char *dev_name) {
+                  const char *dev_name, int attach_type) {
   auto mod = static_cast<ebpf::BPFModule *>(program);
   if (!mod) return -1;
   return mod->bcc_func_load(prog_type, name, insns, prog_len,
                             license, kern_version, log_level,
-                            log_buf, log_buf_size, dev_name);
+                            log_buf, log_buf_size, dev_name, 0, attach_type);
 
 }
 

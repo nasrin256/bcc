@@ -16,6 +16,7 @@
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
+#include <fcntl.h>
 
 #include <bpf/libbpf.h>
 #include <bpf/bpf.h>
@@ -23,6 +24,7 @@
 #include "funclatency.skel.h"
 #include "trace_helpers.h"
 #include "map_helpers.h"
+#include "btf_helpers.h"
 #include "uprobe_helpers.h"
 
 #define warn(...) fprintf(stderr, __VA_ARGS__)
@@ -36,6 +38,10 @@ static struct prog_env {
 	bool timestamp;
 	char *funcname;
 	bool verbose;
+	bool kprobes;
+	char *cgroupspath;
+	bool cg;
+	bool is_kernel_func;
 } env = {
 	.interval = 99999999,
 	.iterations = 99999999,
@@ -48,7 +54,7 @@ static const char args_doc[] = "FUNCTION";
 static const char program_doc[] =
 "Time functions and print latency as a histogram\n"
 "\n"
-"Usage: funclatency [-h] [-m|-u] [-p PID] [-d DURATION] [ -i INTERVAL ]\n"
+"Usage: funclatency [-h] [-m|-u] [-p PID] [-d DURATION] [ -i INTERVAL ] [-c CG]\n"
 "                   [-T] FUNCTION\n"
 "       Choices for FUNCTION: FUNCTION         (kprobe)\n"
 "                             LIBRARY:FUNCTION (uprobe a library in -p PID)\n"
@@ -58,6 +64,7 @@ static const char program_doc[] =
 "Examples:\n"
 "  ./funclatency do_sys_open         # time the do_sys_open() kernel function\n"
 "  ./funclatency -m do_nanosleep     # time do_nanosleep(), in milliseconds\n"
+"  ./funclatency -c CG               # Trace process under cgroupsPath CG\n"
 "  ./funclatency -u vfs_read         # time vfs_read(), in microseconds\n"
 "  ./funclatency -p 181 vfs_read     # time process 181 only\n"
 "  ./funclatency -p 181 c:read       # time the read() C library function\n"
@@ -73,9 +80,11 @@ static const struct argp_option opts[] = {
 	{ "pid", 'p', "PID", 0, "Process ID to trace"},
 	{0, 0, 0, 0, ""},
 	{ "interval", 'i', "INTERVAL", 0, "Summary interval in seconds"},
+	{ "cgroup", 'c', "/sys/fs/cgroup/unified", 0, "Trace process in cgroup path" },
 	{ "duration", 'd', "DURATION", 0, "Duration to trace"},
 	{ "timestamp", 'T', NULL, 0, "Print timestamp"},
 	{ "verbose", 'v', NULL, 0, "Verbose debug output" },
+	{ "kprobes", 'k', NULL, 0, "Use kprobes instead of fentry" },
 	{ NULL, 'h', NULL, OPTION_HIDDEN, "Show the full help"},
 	{},
 };
@@ -101,6 +110,10 @@ static error_t parse_arg(int key, char *arg, struct argp_state *state)
 			argp_usage(state);
 		}
 		env->units = MSEC;
+		break;
+	case 'c':
+		env->cgroupspath = arg;
+		env->cg = true;
 		break;
 	case 'u':
 		if (env->units != NSEC) {
@@ -129,6 +142,9 @@ static error_t parse_arg(int key, char *arg, struct argp_state *state)
 		break;
 	case 'T':
 		env->timestamp = true;
+		break;
+	case 'k':
+		env->kprobes = true;
 		break;
 	case 'v':
 		env->verbose = true;
@@ -181,23 +197,56 @@ static const char *unit_str(void)
 	return "bad units";
 }
 
-static int attach_kprobes(struct funclatency_bpf *obj)
+static bool try_fentry(struct funclatency_bpf *obj)
 {
 	long err;
 
-	obj->links.dummy_kprobe = bpf_program__attach_kprobe(obj->progs.dummy_kprobe, false,
-							     env.funcname);
+	if (env.kprobes || !env.is_kernel_func ||
+	    !fentry_can_attach(env.funcname, NULL)) {
+		goto out_no_fentry;
+	}
+
+	err = bpf_program__set_attach_target(obj->progs.dummy_fentry, 0,
+					     env.funcname);
+	if (err) {
+		warn("failed to set attach fentry: %s\n", strerror(-err));
+		goto out_no_fentry;
+	}
+
+	err = bpf_program__set_attach_target(obj->progs.dummy_fexit, 0,
+					     env.funcname);
+	if (err) {
+		warn("failed to set attach fexit: %s\n", strerror(-err));
+		goto out_no_fentry;
+	}
+
+	bpf_program__set_autoload(obj->progs.dummy_kprobe, false);
+	bpf_program__set_autoload(obj->progs.dummy_kretprobe, false);
+
+	return true;
+
+out_no_fentry:
+	bpf_program__set_autoload(obj->progs.dummy_fentry, false);
+	bpf_program__set_autoload(obj->progs.dummy_fexit, false);
+
+	return false;
+}
+
+static int attach_kprobes(struct funclatency_bpf *obj)
+{
+	obj->links.dummy_kprobe =
+		bpf_program__attach_kprobe(obj->progs.dummy_kprobe, false,
+					   env.funcname);
 	if (!obj->links.dummy_kprobe) {
-		err = -errno;
-		warn("failed to attach kprobe: %ld\n", err);
+		warn("failed to attach kprobe: %d\n", -errno);
 		return -1;
 	}
 
-	obj->links.dummy_kretprobe = bpf_program__attach_kprobe(obj->progs.dummy_kretprobe, true,
-								env.funcname);
+	obj->links.dummy_kretprobe =
+		bpf_program__attach_kprobe(obj->progs.dummy_kretprobe, true,
+					   env.funcname);
 	if (!obj->links.dummy_kretprobe) {
-		err = -errno;
-		warn("failed to attach kretprobe: %ld\n", err);
+		warn("failed to attach kretprobe: %d\n", -errno);
 		return -1;
 	}
 
@@ -260,13 +309,6 @@ out_binary:
 	return ret;
 }
 
-static int attach_probes(struct funclatency_bpf *obj)
-{
-	if (strchr(env.funcname, ':'))
-		return attach_uprobes(obj);
-	return attach_kprobes(obj);
-}
-
 static volatile bool exiting;
 
 static void sig_hand(int signr)
@@ -278,6 +320,7 @@ static struct sigaction sigact = {.sa_handler = sig_hand};
 
 int main(int argc, char **argv)
 {
+	LIBBPF_OPTS(bpf_object_open_opts, open_opts);
 	static const struct argp argp = {
 		.options = opts,
 		.parser = parse_arg,
@@ -289,17 +332,27 @@ int main(int argc, char **argv)
 	struct tm *tm;
 	char ts[32];
 	time_t t;
+	int idx, cg_map_fd;
+	int cgfd = -1;
+	bool used_fentry = false;
 
 	err = argp_parse(&argp, argc, argv, 0, NULL, &env);
 	if (err)
 		return err;
 
+	env.is_kernel_func = !strchr(env.funcname, ':');
+
 	sigaction(SIGINT, &sigact, 0);
 
-	libbpf_set_strict_mode(LIBBPF_STRICT_ALL);
 	libbpf_set_print(libbpf_print_fn);
 
-	obj = funclatency_bpf__open();
+	err = ensure_core_btf(&open_opts);
+	if (err) {
+		fprintf(stderr, "failed to fetch necessary BTF for CO-RE: %s\n", strerror(-err));
+		return 1;
+	}
+
+	obj = funclatency_bpf__open_opts(&open_opts);
 	if (!obj) {
 		warn("failed to open BPF object\n");
 		return 1;
@@ -307,6 +360,9 @@ int main(int argc, char **argv)
 
 	obj->rodata->units = env.units;
 	obj->rodata->targ_tgid = env.pid;
+	obj->rodata->filter_cg = env.cg;
+
+	used_fentry = try_fentry(obj);
 
 	err = funclatency_bpf__load(obj);
 	if (err) {
@@ -314,14 +370,41 @@ int main(int argc, char **argv)
 		return 1;
 	}
 
+/* update cgroup path fd to map */
+	if (env.cg) {
+		idx = 0;
+		cg_map_fd = bpf_map__fd(obj->maps.cgroup_map);
+		cgfd = open(env.cgroupspath, O_RDONLY);
+		if (cgfd < 0) {
+			fprintf(stderr, "Failed opening Cgroup path: %s", env.cgroupspath);
+			goto cleanup;
+		}
+		if (bpf_map_update_elem(cg_map_fd, &idx, &cgfd, BPF_ANY)) {
+			fprintf(stderr, "Failed adding target cgroup to map");
+			goto cleanup;
+		}
+	}
+
 	if (!obj->bss) {
 		warn("Memory-mapping BPF maps is supported starting from Linux 5.7, please upgrade.\n");
 		goto cleanup;
 	}
 
-	err = attach_probes(obj);
-	if (err)
+	if (!used_fentry) {
+		if (env.is_kernel_func)
+			err = attach_kprobes(obj);
+		else
+			err = attach_uprobes(obj);
+		if (err)
+			goto cleanup;
+	}
+
+	err = funclatency_bpf__attach(obj);
+	if (err) {
+		fprintf(stderr, "failed to attach BPF programs: %s\n",
+			strerror(-err));
 		goto cleanup;
+	}
 
 	printf("Tracing %s.  Hit Ctrl-C to exit\n", env.funcname);
 
@@ -337,12 +420,18 @@ int main(int argc, char **argv)
 		}
 
 		print_log2_hist(obj->bss->hist, MAX_SLOTS, unit_str());
+
+		/* Cleanup histograms for interval output */
+		memset(obj->bss->hist, 0, sizeof(obj->bss->hist));
 	}
 
 	printf("Exiting trace of %s\n", env.funcname);
 
 cleanup:
 	funclatency_bpf__destroy(obj);
+	cleanup_core_btf(&open_opts);
+	if (cgfd > 0)
+		close(cgfd);
 
 	return err != 0;
 }
